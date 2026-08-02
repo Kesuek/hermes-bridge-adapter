@@ -277,6 +277,7 @@ class BridgeAdapter(BasePlatformAdapter):
             return
 
         # Build session source
+        thread_id = data.get("thread_id") or data.get("thread_root")
         source = SessionSource(
             platform=Platform("bridge-adapter"),
             chat_id=chat_id,
@@ -284,6 +285,7 @@ class BridgeAdapter(BasePlatformAdapter):
             chat_type=chat_type,
             user_id=sender,
             user_name=data.get("sender_name") or sender,
+            thread_id=thread_id,
         )
 
         # Determine message type
@@ -384,7 +386,8 @@ class BridgeAdapter(BasePlatformAdapter):
             text = str(content)
 
         bridge = self._resolve_bridge(chat_id)
-        return await self._write_outbox(bridge, chat_id, text=text, reply_to=reply_to)
+        thread_id = (metadata or {}).get("thread_id")
+        return await self._write_outbox(bridge, chat_id, text=text, reply_to=reply_to, thread_id=thread_id)
 
     async def send_typing(self, chat_id):
         """Write a typing indicator to the outbox."""
@@ -586,7 +589,7 @@ class BridgeAdapter(BasePlatformAdapter):
     async def _write_outbox(
         self, bridge: str, chat_id: str, text: str = "",
         attachments: list = None, typing: bool = False,
-        reply_to: str = None,
+        reply_to: str = None, thread_id: str = None,
     ) -> SendResult:
         """Write a JSON file to the outbox directory."""
         outbox_dir = self._bridge_dir / "outbox" / bridge
@@ -601,6 +604,7 @@ class BridgeAdapter(BasePlatformAdapter):
             "attachments": attachments or [],
             "typing": typing,
             "reply_to": reply_to,
+            "thread_id": thread_id,
             "metadata": {},
         }
 

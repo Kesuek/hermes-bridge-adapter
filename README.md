@@ -50,6 +50,8 @@ Instead of each messaging platform (iMessage, Matrix, Telegram, WhatsApp, Signal
     "name": "Project Chat"
   },
   "text": "Hello! Can you check the deployment status?",
+  "thread_id": "thread_001",
+  "thread_root": "msg_001",
   "attachments": [
     {
       "type": "image",
@@ -75,6 +77,7 @@ Instead of each messaging platform (iMessage, Matrix, Telegram, WhatsApp, Signal
     "bridge": "imsg"
   },
   "text": "Sure, let me check that.",
+  "thread_id": "thread_001",
   "attachments": [
     {
       "type": "image",
