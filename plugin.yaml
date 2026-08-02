@@ -3,7 +3,7 @@ label: Bridge Adapter
 kind: platform
 version: 1.0.0
 description: Generic JSON-file-based bridge adapter. Polls inbox/ for incoming messages, writes outgoing messages to outbox/. External services (imsg, Matrix, Telegram, ...) write/read JSON files in a shared directory.
-author: Felix
+author: Hermes Agent
 requires_env:
   - name: BRIDGE_DIR
     description: Path to the bridge directory (inbox/ outbox/ status/ subdirs)
