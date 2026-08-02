@@ -1,0 +1,24 @@
+name: bridge-adapter
+label: Bridge Adapter
+kind: platform
+version: 1.0.0
+description: Generic JSON-file-based bridge adapter. Polls inbox/ for incoming messages, writes outgoing messages to outbox/. External services (imsg, Matrix, Telegram, ...) write/read JSON files in a shared directory.
+author: Felix
+requires_env:
+  - name: BRIDGE_DIR
+    description: Path to the bridge directory (inbox/ outbox/ status/ subdirs)
+    prompt: Bridge directory
+    password: false
+optional_env:
+  - name: BRIDGE_POLL_INTERVAL
+    description: Polling interval in seconds (default 1.0)
+    password: false
+  - name: BRIDGE_ALLOWED_USERS
+    description: Comma-separated list of allowed user IDs
+    password: false
+  - name: BRIDGE_ALLOW_ALL_USERS
+    description: Allow all users (true/false)
+    password: false
+  - name: BRIDGE_HOME_CHANNEL
+    description: Home channel for cron delivery
+    password: false
