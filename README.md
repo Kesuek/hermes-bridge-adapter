@@ -137,6 +137,47 @@ Instead of each messaging platform (iMessage, Matrix, Telegram, WhatsApp, Signal
 
 4. Restart the Gateway.
 
+## Adding a New Bridge
+
+Bridges are **auto-discovered** — the adapter scans `inbox/` for subdirectories and starts polling them automatically. No config changes needed.
+
+To add a new bridge (e.g. Telegram):
+
+```bash
+# 1. Create the directory structure
+mkdir -p <bridge_dir>/{inbox,outbox,status,media}/telegram
+
+# 2. Write a wrapper script that:
+#    - Reads outbox/telegram/*.json → sends via Telegram API
+#    - Writes incoming messages to inbox/telegram/*.json
+#    - Writes status to status/telegram/status.json
+
+# 3. Start the wrapper
+python3 telegram-wrapper.py
+```
+
+The adapter will pick it up on the next poll cycle (default: every 1 second).
+
+### Directory structure with multiple bridges
+
+```
+<bridge_dir>/
+├── inbox/
+│   ├── imsg/              ← iMessage wrapper writes here
+│   └── telegram/          ← Telegram wrapper writes here
+├── outbox/
+│   ├── imsg/              ← Adapter writes iMessage replies here
+│   └── telegram/          ← Adapter writes Telegram replies here
+├── status/
+│   ├── imsg/
+│   └── telegram/
+└── media/
+    ├── imsg/
+    └── telegram/
+```
+
+Each bridge is fully isolated — its own inbox, outbox, status, and media directories. Wrappers only touch their own namespace.
+
 ## Writing a Bridge Wrapper
 
 A bridge wrapper is any script that:
