@@ -42,18 +42,18 @@ Instead of each messaging platform (iMessage, Matrix, Telegram, WhatsApp, Signal
   "timestamp": "2026-07-26T12:00:00Z",
   "from": {
     "id": "user_42",
-    "name": "Ronny",
+    "name": "Alice",
     "platform": "imsg"
   },
   "chat": {
     "id": "chat_99",
-    "name": "Felix"
+    "name": "Project Chat"
   },
-  "text": "Hello!",
+  "text": "Hello! Can you check the deployment status?",
   "attachments": [
     {
       "type": "image",
-      "path": "media/imsg/incoming/photo.jpg",
+      "path": "media/imsg/incoming/screenshot.jpg",
       "mime": "image/jpeg"
     }
   ],
