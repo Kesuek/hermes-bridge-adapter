@@ -2,12 +2,18 @@
 """
 imsg-wrapper — Bridge-Adapter Wrapper für iMessage.
 
-Läuft auf dem Linux-Host, steuert imsg per SSH auf dem Mac Mini (100.64.0.5).
+Steuert imsg per SSH auf einem entfernten macOS-Host.
+Konfigurierbar via Umgebungsvariablen (siehe unten).
 
 - Outbox-Poller: Liest outbox/imsg/*.json, sendet per `imessage` SSH
 - Inbound-Stream: imsg watch --json --receptions → inbox/imsg/
 - Attachments: media/imsg/incoming/ + outgoing/
 - Status: status/imsg/status.json
+
+Umgebungsvariablen:
+  BRIDGE_DIR         Pfad zum Bridge-Verzeichnis (default: ~/.hermes/bridge)
+  IMSG_SSH_HOST      SSH-Ziel für imsg (default: user@mac-host.local)
+  BRIDGE_POLL_INTERVAL Poll-Intervall in Sekunden (default: 1.0)
 """
 
 import json
@@ -30,7 +36,7 @@ logger = logging.getLogger("imsg-wrapper")
 
 BRIDGE_DIR = Path(os.environ.get("BRIDGE_DIR", str(Path.home() / ".hermes" / "bridge")))
 BRIDGE = "imsg"
-SSH_HOST = os.environ.get("IMSG_SSH_HOST", "autologin@100.64.0.5")
+SSH_HOST = os.environ.get("IMSG_SSH_HOST", "user@mac-host.local")
 POLL_INTERVAL = float(os.environ.get("BRIDGE_POLL_INTERVAL", "1.0"))
 
 
