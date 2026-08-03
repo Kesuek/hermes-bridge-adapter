@@ -930,4 +930,14 @@ def register(ctx):
         cron_deliver_env_var="BRIDGE_HOME_CHANNEL",
         max_message_length=MAX_MESSAGE_LENGTH,
         emoji="🔌",
+        platform_hint=(
+            "You are on a generic text-messaging platform via the Bridge Adapter. "
+            "Bridges (imsg, Matrix, Telegram, Talk, ...) self-register as YAML "
+            "manifests in <bridge_dir>/registry/. To see which bridges are "
+            "registered and their accepted target formats, read those manifest "
+            "files (e.g. registry/imsg.yaml has target_format). To send a "
+            "message, address the target as <bridge>:<target>, e.g. "
+            "imsg:ronny.pietschke@icloud.com for iMessage. Match the target to "
+            "the bridge's target_format (email / phone / chat_id)."
+        ),
     )
