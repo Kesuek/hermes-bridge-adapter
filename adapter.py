@@ -618,13 +618,50 @@ class BridgeAdapter(BasePlatformAdapter):
     # ── Sending ──────────────────────────────────────────────────────
 
     async def send(self, chat_id, content, reply_to=None, metadata=None):
-        """Write an outgoing text message to the outbox."""
+        """Write an outgoing text message to the outbox.
+
+        Routing fallback (T-053): if the target isn't routable — the bridge
+        prefix isn't registered, or the target doesn't match the bridge's
+        ``target_format`` — no outbox file is written. Instead a
+        ``SendResult(success=False, error=...)`` is returned with a clear
+        message so the caller (agent) can correct the addressing instead of
+        silently dropping or misrouting the message.
+        """
         if isinstance(content, list):
             text = " ".join(str(c) for c in content if c)
         else:
             text = str(content)
 
-        bridge = self._resolve_bridge(chat_id)
+        bridge = self._resolve_bridge_or_none(chat_id)
+        if bridge is None:
+            return SendResult(
+                success=False,
+                message_id="",
+                error=(
+                    f"Target '{chat_id}' is not routable: bridge prefix "
+                    f"unknown. Registered bridges: "
+                    f"{', '.join(self._bridges) or '(none)'}. "
+                    f"Address as <bridge>:<target>, e.g. imsg:user@example.com."
+                ),
+                error_kind="routing",
+            )
+
+        # Extract the target portion (after "<bridge>:") for format validation
+        target_part = chat_id.split(":", 1)[1] if ":" in chat_id else chat_id
+        if not self._validate_target(bridge, target_part):
+            manifest = self._manifests.get(bridge)
+            formats = ", ".join(manifest.target_format) if manifest else "any"
+            return SendResult(
+                success=False,
+                message_id="",
+                error=(
+                    f"Target '{chat_id}' is not routable: '{target_part}' does "
+                    f"not match bridge '{bridge}' target_format ({formats}). "
+                    f"Use a valid target for this bridge."
+                ),
+                error_kind="routing",
+            )
+
         thread_id = (metadata or {}).get("thread_id")
         return await self._write_outbox(bridge, chat_id, text=text, reply_to=reply_to, thread_id=thread_id)
 
@@ -818,12 +855,31 @@ class BridgeAdapter(BasePlatformAdapter):
     # ── Bridge helpers ───────────────────────────────────────────────
 
     def _resolve_bridge(self, chat_id: str) -> str:
-        """Determine which bridge a chat_id belongs to."""
+        """Determine which bridge a chat_id belongs to (defaults to first)."""
         if ":" in chat_id:
             prefix, _, rest = chat_id.partition(":")
             if prefix in self._bridges:
                 return prefix
         return self._bridges[0] if self._bridges else "default"
+
+    def _resolve_bridge_or_none(self, chat_id: str) -> Optional[str]:
+        """Resolve the bridge for a chat_id, or ``None`` if not routable.
+
+        Unlike :meth:`_resolve_bridge`, this does NOT fall back to a default
+        bridge. Returns the bridge only when the ``<bridge>:`` prefix is an
+        actually registered bridge (routing fallback / T-053).
+        """
+        if ":" in chat_id:
+            prefix, _, _ = chat_id.partition(":")
+            if prefix in self._bridges:
+                return prefix
+        # Bare chat_id without a registered bridge prefix is unroutable
+        if not self._bridges:
+            return None
+        # A bare target with no ':' and exactly one bridge → route to it
+        if ":" not in chat_id and len(self._bridges) == 1:
+            return self._bridges[0]
+        return None
 
     def _validate_target(self, bridge: str, target: str) -> bool:
         """Validate a target against a bridge's declared target_format.

@@ -433,3 +433,49 @@ def test_process_incoming_injects_routing_context(tmp_path):
     assert "reply_to abc123" in event.text
     # original text preserved
     assert event.text.startswith("Hallo")
+
+
+# ── T-053: routing fallback — unroutable target → SendResult error ──
+
+
+def test_send_routable_writes_outbox(tmp_path):
+    a = _make_adapter(tmp_path)
+    reg = a._bridge_dir / "registry"
+    reg.mkdir()
+    (reg / "imsg.yaml").write_text("name: imsg\ntarget_format: [email]\n", encoding="utf-8")
+    a._reconcile_registry_sync()
+
+    res = asyncio.run(a.send("imsg:ronny.pietschke@icloud.com", "Hallo"))
+    assert res.success is True
+    assert (a._bridge_dir / "outbox" / "imsg").exists()
+
+
+def test_send_unknown_bridge_fails_with_routing_error(tmp_path):
+    a = _make_adapter(tmp_path)
+    # No manifest for "talk" → not registered → unroutable
+    res = asyncio.run(a.send("talk:some-chat", "Hallo"))
+    assert res.success is False
+    assert "talk" in res.error
+    assert "bridge" in res.error.lower()
+    # No outbox written for an unknown bridge
+    assert not (a._bridge_dir / "outbox" / "talk").exists()
+
+
+def test_send_wrong_target_format_fails_with_routing_error(tmp_path):
+    a = _make_adapter(tmp_path)
+    reg = a._bridge_dir / "registry"
+    reg.mkdir()
+    (reg / "imsg.yaml").write_text("name: imsg\ntarget_format: [email]\n", encoding="utf-8")
+    a._reconcile_registry_sync()
+
+    # imsg accepts email only; a bare name is not a valid target
+    res = asyncio.run(a.send("imsg:Anja", "Hallo"))
+    assert res.success is False
+    assert "target" in res.error.lower()
+    assert "imsg" in res.error
+
+
+def test_send_without_any_bridges_fails(tmp_path):
+    a = _make_adapter(tmp_path)
+    res = asyncio.run(a.send("anything", "Hallo"))
+    assert res.success is False
