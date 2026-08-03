@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
-imsg-wrapper — Bridge-Adapter Wrapper für iMessage.
+imsg-wrapper — Bridge Adapter wrapper for iMessage.
 
-Steuert imsg per SSH auf einem entfernten macOS-Host.
-Konfigurierbar via Umgebungsvariablen (siehe unten).
+Drives imsg over SSH on a remote macOS host.
+Configurable via environment variables (see below).
 
-- Outbox-Poller: Liest outbox/imsg/*.json, sendet per `imessage` SSH
-- Inbound-Stream: imsg watch --json --receptions → inbox/imsg/
+- Outbox poller: reads outbox/imsg/*.json, sends via `imessage` SSH
+- Inbound stream: imsg watch --json --receptions → inbox/imsg/
 - Attachments: media/imsg/incoming/ + outgoing/
 - Status: status/imsg/status.json
 
-Umgebungsvariablen:
-  BRIDGE_DIR         Pfad zum Bridge-Verzeichnis (default: ~/.hermes/bridge)
-  IMSG_SSH_HOST      SSH-Ziel für imsg (default: user@mac-host.local)
-  BRIDGE_POLL_INTERVAL Poll-Intervall in Sekunden (default: 1.0)
+Environment variables:
+  BRIDGE_DIR         Path to the bridge directory (default: ~/.hermes/bridge)
+  IMSG_SSH_HOST      SSH target for imsg (default: user@mac-host.local)
+  BRIDGE_POLL_INTERVAL Poll interval in seconds (default: 1.0)
 """
 
 import json

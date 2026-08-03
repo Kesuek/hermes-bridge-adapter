@@ -392,13 +392,13 @@ class BridgeAdapter(BasePlatformAdapter):
         for name, m in manifests.items():
             if name not in self._bridges:
                 self._register_bridge(name, m)
-                logger.info("Bridge '%s' angemeldet (registry)", name)
+                logger.info("Bridge '%s' registered (registry)", name)
 
         # Removed bridges: drop any known bridge no longer in the registry.
         for name in list(self._bridges):
             if name not in manifests:
                 self._unregister_bridge(name)
-                logger.info("Bridge '%s' abgemeldet (registry rm)", name)
+                logger.info("Bridge '%s' unregistered (registry rm)", name)
 
     def _register_bridge(self, name: str, manifest: BridgeManifest) -> None:
         """Register a new bridge: track it and create its directory tree."""

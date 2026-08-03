@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-test-wrapper — Simulierter Bridge-Adapter Wrapper für Testzwecke.
+test-wrapper — Simulated bridge adapter wrapper for testing.
 
-Registriert eine Test-Bridge per Manifest (registry/<name>.yaml), schreibt
-eine Nachricht in die Inbox, liest die Outbox und zeigt den Status an.
-Demonstriert den kompletten Bridge-Lebenszyklus (T-050) ohne echten Dienst.
+Registers a test bridge via a manifest (registry/<name>.yaml), writes a
+message into the inbox, reads the outbox, and reports status. Demonstrates
+the full bridge lifecycle (T-050) without needing a real external service.
 
-Nutzung:
-  test-wrapper.py register <name>   # Manifest ablegen (Bridge anmelden)
-  test-wrapper.py send <name> <ziel> <text>   # Nachricht in Inbox schreiben
-  test-wrapper.py drain <name>      # Outbox lesen + anzeigen (statt Senden)
-  test-wrapper.py status <name>     # Status-Datei schreiben
-  test-wrapper.py unregister <name> # Manifest löschen (Bridge abmelden)
-  test-wrapper.py list              # angemeldete Bridges anzeigen
+Usage:
+  test-wrapper.py register <name>   # write manifest (register bridge)
+  test-wrapper.py send <name> <target> <text>   # write inbox message
+  test-wrapper.py drain <name>      # read outbox + display (instead of sending)
+  test-wrapper.py status <name>     # write status file
+  test-wrapper.py unregister <name> # delete manifest (unregister bridge)
+  test-wrapper.py list              # show registered bridges
 """
 
 import json
@@ -43,18 +43,18 @@ def register(name: str):
     REGISTRY.mkdir(parents=True, exist_ok=True)
     path = REGISTRY / f"{name}.yaml"
     path.write_text(json.dumps(_manifest(name), indent=2), "utf-8")
-    print(f"✓ Manifest angelegt: {path} — Bridge '{name}' angemeldet")
-    print("  Adapter registriert die Bridge innerhalb ~5s (Registry-Poll).")
+    print(f"✓ Manifest written: {path} — bridge '{name}' registered")
+    print("  Adapter registers the bridge within ~5s (registry poll).")
 
 
 def unregister(name: str):
     path = REGISTRY / f"{name}.yaml"
     if path.exists():
         path.unlink()
-        print(f"✓ Manifest entfernt: {path} — Bridge '{name}' abgemeldet")
-        print("  Adapter räumt status/ + media/ auf innerhalb ~5s.")
+        print(f"✓ Manifest removed: {path} — bridge '{name}' unregistered")
+        print("  Adapter cleans up status/ + media/ within ~5s.")
     else:
-        print(f"! Kein Manifest für '{name}' gefunden")
+        print(f"! No manifest found for '{name}'")
 
 
 def send(name: str, target: str, text: str):
@@ -76,25 +76,25 @@ def send(name: str, target: str, text: str):
     }
     path = inbox / f"{msg['id']}.json"
     path.write_text(json.dumps(msg, ensure_ascii=False, indent=2), "utf-8")
-    print(f"✓ Inbox-Nachricht geschrieben: {path}")
-    print(f"  text='{text}' → Adapter verarbeitet sie als MessageEvent.")
+    print(f"✓ Inbox message written: {path}")
+    print(f"  text='{text}' → adapter processes it as a MessageEvent.")
 
 
 def drain(name: str):
     outbox = OUTBOX / name
     if not outbox.exists():
-        print(f"! Kein outbox/{name}/ — Adapter hat nichts gesendet.")
+        print(f"! No outbox/{name}/ — adapter has sent nothing.")
         return
     files = sorted(outbox.glob("*.json"), key=lambda p: p.stat().st_mtime)
     if not files:
-        print(f"• outbox/{name}/ ist leer")
+        print(f"• outbox/{name}/ is empty")
         return
     for f in files:
         data = json.loads(f.read_text("utf-8"))
         print(f"  [{f.name}] target={data.get('target')} "
               f"typing={data.get('typing')} text={data.get('text', '')[:60]!r}")
         f.unlink(missing_ok=True)
-    print(f"✓ {len(files)} Outbox-Nachricht(en) ausgelesen + gelöscht")
+    print(f"✓ {len(files)} outbox message(s) read + deleted")
 
 
 def status(name: str, connected: bool = True):
@@ -107,18 +107,18 @@ def status(name: str, connected: bool = True):
         "error": None,
     }
     (sdir / "status.json").write_text(json.dumps(data, indent=2), "utf-8")
-    print(f"✓ Status geschrieben: connected={connected}")
+    print(f"✓ Status written: connected={connected}")
 
 
 def list_bridges():
     if not REGISTRY.exists():
-        print("• registry/ existiert nicht — keine Bridges angemeldet")
+        print("• registry/ does not exist — no bridges registered")
         return
     names = sorted(p.stem for p in REGISTRY.glob("*.yaml"))
     if not names:
-        print("• Keine Bridges angemeldet (registry/ leer)")
+        print("• No bridges registered (registry/ empty)")
         return
-    print(f"Angemeldete Bridges ({len(names)}):")
+    print(f"Registered bridges ({len(names)}):")
     for n in names:
         st = STATUS / n / "status.json"
         conn = "?"
@@ -148,7 +148,7 @@ def main():
     elif cmd == "list":
         list_bridges()
     else:
-        print(f"! Unbekannter Befehl: {cmd}")
+        print(f"! Unknown command: {cmd}")
         print(__doc__)
         sys.exit(1)
 
