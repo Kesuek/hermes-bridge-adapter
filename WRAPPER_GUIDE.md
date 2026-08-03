@@ -38,6 +38,28 @@ Each bridge gets its own namespace under the bridge directory:
     └── <bridge>/outgoing/  ← Outgoing attachments (adapter copies here)
 ```
 
+## Self-Registration (Registry)
+
+A bridge registers itself by dropping a manifest into `registry/`. The
+adapter polls `registry/` and reconciles at runtime:
+
+- **Manifest present** → bridge registered; `inbox/`, `outbox/`, `status/`,
+  `media/` directories are created automatically.
+- **Manifest removed** (`rm registry/<bridge>.yaml`) → bridge deregistered;
+  `status/`/`media/` are cleaned up.
+
+```yaml
+# registry/imsg.yaml
+name: imsg
+service: imessage
+host: mac-mini-01
+target_format: [email, phone, chat_id]   # which target shapes this bridge accepts
+capabilities: [text, attachments, reactions]
+```
+
+The wrapper should write its manifest on startup and remove it on shutdown,
+so the adapter registers/deregisters the bridge automatically.
+
 ## Wrapper Responsibilities
 
 A wrapper must do four things:
@@ -395,9 +417,15 @@ All configuration should be done through environment variables so the wrapper wo
 
 ## Testing Your Wrapper
 
-1. Create the directory structure:
+1. Register the bridge by writing its manifest (the adapter creates the
+   directory structure automatically):
    ```bash
-   mkdir -p <bridge_dir>/{inbox,outbox,status,media}/mybridge
+   cat > <bridge_dir>/registry/mybridge.yaml <<'EOF'
+   name: mybridge
+   service: mybridge
+   target_format: [chat_id]
+   capabilities: [text]
+   EOF
    ```
 
 2. Start your wrapper:

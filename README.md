@@ -144,6 +144,9 @@ capabilities: [text]
 - **Auto-cleanup** — old media files and stale outbox entries are purged
 - **Health monitoring** — status files polled every 60s, logged on disconnect
 - **Multiple gateways** — works with parallel Hermes Gateway instances
+- **Registry self-registration (T-050)** — bridges register via `registry/` manifests, picked up at runtime without a restart
+- **Agent awareness (T-051)** — a system-prompt platform hint teaches the agent to read `registry/` and address messages as `<bridge>:<target>`; every inbound message carries a compact routing line (`[Message from <sender>, bridge <bridge>, reply to <bridge>:<target>]`)
+- **Routing fallback (T-053)** — `send()` validates the target; unroutable targets (unknown bridge / wrong format) return a clear `SendResult` error instead of silently misrouting
 
 ## Installation
 
@@ -172,29 +175,40 @@ capabilities: [text]
 
 ## Adding a New Bridge
 
-Bridges are **auto-discovered** — the adapter scans `inbox/` for subdirectories and starts polling them automatically. No config changes needed.
+Bridges **self-register** by dropping a manifest into `registry/`. The adapter polls `registry/` every few seconds and picks up new/removed manifests at runtime — no config change, no restart.
 
 To add a new bridge (e.g. Telegram):
 
 ```bash
-# 1. Create the directory structure
-mkdir -p <bridge_dir>/{inbox,outbox,status,media}/telegram
+# 1. Write a registry manifest (this is the registration)
+cat > <bridge_dir>/registry/telegram.yaml <<'EOF'
+name: telegram
+service: telegram
+host: my-host
+target_format: [chat_id]
+capabilities: [text]
+EOF
 
-# 2. Write a wrapper script that:
+# 2. The adapter creates inbox/outbox/status/media/telegram automatically
+
+# 3. Write a wrapper script that:
 #    - Reads outbox/telegram/*.json → sends via Telegram API
 #    - Writes incoming messages to inbox/telegram/*.json
 #    - Writes status to status/telegram/status.json
 
-# 3. Start the wrapper
+# 4. Start the wrapper
 python3 telegram-wrapper.py
 ```
 
-The adapter will pick it up on the next poll cycle (default: every 1 second).
+To take a bridge down, remove its manifest (`rm registry/telegram.yaml`) — the adapter deregisters it and cleans up. See `imsg-wrapper.py` for a complete wrapper example.
 
 ### Directory structure with multiple bridges
 
 ```
 <bridge_dir>/
+├── registry/
+│   ├── imsg.yaml          ← iMessage bridge manifest
+│   └── telegram.yaml      ← Telegram bridge manifest
 ├── inbox/
 │   ├── imsg/              ← iMessage wrapper writes here
 │   └── telegram/          ← Telegram wrapper writes here
@@ -220,7 +234,7 @@ A bridge wrapper is any script that:
 3. **Writes** incoming messages as JSON to `inbox/<bridge>/`
 4. **Writes** status to `status/<bridge>/`
 
-See `imsg-wrapper.py` for a complete example.
+See `imsg-wrapper.py` for a complete example (watch stream with auto-reconnect, history safety net, and registry self-registration).
 
 ## Requirements
 
