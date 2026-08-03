@@ -517,6 +517,16 @@ class BridgeAdapter(BasePlatformAdapter):
             thread_id=thread_id,
         )
 
+        # Append a compact routing context line so the agent knows exactly
+        # which bridge this message came from and where to reply. This is
+        # stable for the duration of the message (no prompt-cache invalidation),
+        # and lets the agent address replies as <bridge>:<target> without
+        # digging into raw_message.
+        routing_ctx = f"Message from {sender}, bridge {bridge}, reply to {chat_id}"
+        if data.get("reply_to"):
+            routing_ctx += f" (reply_to {data.get('reply_to')})"
+        effective_text = f"{text}\n\n[{routing_ctx}]" if text else f"[{routing_ctx}]"
+
         # Determine message type
         attachments = data.get("attachments", [])
         if attachments:
@@ -550,7 +560,7 @@ class BridgeAdapter(BasePlatformAdapter):
                     )
 
         event = MessageEvent(
-            text=text,
+            text=effective_text,
             message_type=msg_type,
             source=source,
             raw_message=data,

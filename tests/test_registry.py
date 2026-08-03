@@ -396,3 +396,40 @@ def test_connect_without_registry_starts_and_waits(tmp_path):
     assert ok is True
     assert a._bridges == []
     asyncio.run(a.disconnect())
+
+# ── T-051: routing context injection ────────────────────────────────
+
+
+def test_process_incoming_injects_routing_context(tmp_path):
+    from unittest.mock import AsyncMock
+
+    a = _make_adapter(tmp_path)
+    a._extra["allow_all"] = "true"  # allow the test sender
+    reg = a._bridge_dir / "registry"
+    reg.mkdir()
+    (reg / "imsg.yaml").write_text("name: imsg\ntarget_format: [email]\n", encoding="utf-8")
+    a._reconcile_registry_sync()
+
+    a.handle_message = AsyncMock()
+
+    async def run():
+        await a._process_incoming(
+            "imsg",
+            {
+                "sender": "ronny.pietschke@icloud.com",
+                "text": "Hallo",
+                "chat": {"id": "imsg:ronny.pietschke@icloud.com", "type": "direct"},
+                "reply_to": "abc123",
+            },
+            tmp_path / "x.json",
+        )
+
+    asyncio.run(run())
+
+    a.handle_message.assert_awaited_once()
+    event = a.handle_message.await_args[0][0]
+    assert "[Message from ronny.pietschke@icloud.com, bridge imsg," in event.text
+    assert "reply to imsg:ronny.pietschke@icloud.com" in event.text
+    assert "reply_to abc123" in event.text
+    # original text preserved
+    assert event.text.startswith("Hallo")
