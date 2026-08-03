@@ -221,6 +221,16 @@ def watch_loop():
     """
     backoff = 1.0
     next_restart = time.time() + WATCH_RESTART_INTERVAL
+    stop_heartbeat = threading.Event()
+
+    def _heartbeat():
+        """Refresh the status heartbeat so last_seen stays fresh even when
+        no messages arrive for a while. Runs in its own thread because the
+        watch stream's read loop blocks on stdin."""
+        while not stop_heartbeat.is_set():
+            write_status(connected=True)
+            stop_heartbeat.wait(60)
+
     while True:
         try:
             proc = subprocess.Popen(
@@ -232,6 +242,8 @@ def watch_loop():
             )
             logger.info("Watch stream started (pid %s)", proc.pid)
             write_status(connected=True)
+            hb = threading.Thread(target=_heartbeat, daemon=True)
+            hb.start()
 
             for line in proc.stdout:
                 line = line.strip()
@@ -254,12 +266,14 @@ def watch_loop():
                     break
 
             # Stream ended (SSH dead or watch stopped)
+            stop_heartbeat.set()
             if proc.poll() is None:
                 proc.terminate()
                 proc.wait()
             logger.warning("Watch stream ended — reconnecting in %.1fs", backoff)
         except Exception as e:
             logger.error("Watch loop error: %s — reconnect in %.1fs", e, backoff)
+            stop_heartbeat.set()
 
         write_status(connected=False, error="watch stream down")
         time.sleep(backoff)
