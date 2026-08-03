@@ -30,6 +30,8 @@ import uuid
 from pathlib import Path
 from typing import Optional
 
+import yaml
+
 from gateway.config import Platform, PlatformConfig
 from gateway.platforms.base import (
     BasePlatformAdapter,
@@ -47,17 +49,143 @@ MEDIA_CLEANUP_MAX_AGE = 86400  # 24h
 OUTBOX_CLEANUP_MAX_AGE = 3600  # 1h
 CLEANUP_INTERVAL = 300  # 5min
 STATUS_POLL_INTERVAL = 60  # 1min
+REGISTRY_POLL_INTERVAL = 5.0  # seconds
+REGISTRY_DIR_NAME = "registry"
+MANIFEST_FIELDS = ["name", "service", "host", "target_format", "capabilities"]
 DEFAULT_MENTION_PATTERNS = [
     r"(?<![\\w@])@?hermes\\s+agent\\b[,:\\-]?",
     r"(?<![\\w@])@?hermes\\b[,:\\-]?",
 ]
 
 
-class BridgeConfig:
-    """Per-bridge configuration, with fallback to global defaults."""
+# ── Registry: Manifest Schema + Loader ───────────────────────────────
 
-    def __init__(self, name: str, global_extra: dict):
+
+class BridgeManifest:
+    """Parsed bridge manifest (``registry/<name>.yaml``).
+
+    A manifest is the single source of truth for a bridge's identity: its
+    presence in ``registry/`` means the bridge is registered, removing the
+    file deregisters it. ``target_format`` declares which target shapes the
+    bridge accepts (used by :meth:`accepts_target` as the basis for the
+    routing check prepared in T-050; full fallback logic lands in T-053).
+    """
+
+    def __init__(
+        self,
+        name: str,
+        service: str = "",
+        host: str = "",
+        target_format: Optional[list] = None,
+        capabilities: Optional[list] = None,
+    ):
         self.name = name
+        self.service = service or name
+        self.host = host or ""
+        self.target_format = list(target_format) if target_format else []
+        self.capabilities = list(capabilities) if capabilities else []
+
+    def __repr__(self) -> str:  # pragma: no cover - debug helper
+        return (
+            f"BridgeManifest(name={self.name!r}, service={self.service!r}, "
+            f"host={self.host!r}, target_format={self.target_format!r}, "
+            f"capabilities={self.capabilities!r})"
+        )
+
+    def accepts_target(self, target: str) -> bool:
+        """Check a target against the bridge's declared target formats.
+
+        With no ``target_format`` declared the bridge is permissive and
+        accepts anything. Otherwise the target must match at least one of
+        the declared formats:
+
+        - ``email``  → target contains ``@``
+        - ``phone``  → target contains at least one digit
+        - ``chat_id``→ accepts any non-empty target (opaque chat id)
+        """
+        if not target:
+            return False
+        if not self.target_format:
+            return True  # no declared constraint → accept anything
+        if "email" in self.target_format and "@" in target:
+            return True
+        if "phone" in self.target_format and any(c.isdigit() for c in target):
+            return True
+        if "chat_id" in self.target_format:
+            return True
+        return False
+
+
+def load_manifest(data: dict) -> BridgeManifest:
+    """Build a :class:`BridgeManifest` from a parsed YAML dict.
+
+    Raises :class:`ValueError` if the manifest is missing a non-empty
+    ``name`` (the only required field).
+    """
+    if not isinstance(data, dict):
+        raise ValueError(f"Manifest must be a mapping, got {type(data).__name__}")
+    name = str(data.get("name", "")).strip()
+    if not name:
+        raise ValueError("Manifest missing 'name'")
+
+    def _as_list(key):
+        val = data.get(key)
+        if val is None:
+            return []
+        if isinstance(val, (list, tuple)):
+            return [str(v) for v in val]
+        # scalar → single-element list
+        return [str(val)]
+
+    return BridgeManifest(
+        name=name,
+        service=str(data.get("service", "")).strip(),
+        host=str(data.get("host", "")).strip(),
+        target_format=_as_list("target_format"),
+        capabilities=_as_list("capabilities"),
+    )
+
+
+def read_manifest(path: Path) -> BridgeManifest:
+    """Read and parse a manifest YAML file from ``path``."""
+    with open(path, "r", encoding="utf-8") as f:
+        return load_manifest(yaml.safe_load(f) or {})
+
+
+def scan_registry(registry_dir: Path) -> dict:
+    """Return ``{bridge_name: BridgeManifest}`` from ``*.yaml`` files in ``registry_dir``.
+
+    Missing directory → empty dict. Bad manifests (unreadable, invalid) are
+    skipped with a warning rather than aborting the whole scan, so one
+    broken manifest cannot take down all bridges.
+    """
+    result: dict[str, BridgeManifest] = {}
+    if not registry_dir.exists():
+        return result
+    for f in sorted(registry_dir.glob("*.yaml")):
+        try:
+            m = read_manifest(f)
+        except (OSError, ValueError) as e:
+            logger.warning("Bad manifest %s: %s", f, e)
+            continue
+        result[m.name] = m
+    return result
+
+
+class BridgeConfig:
+    """Per-bridge configuration, with fallback to global defaults.
+
+    ``global_extra`` carries env/config-driven options (mention patterns,
+    allow-list, poll interval). The optional ``manifest`` carries the
+    bridge's declared identity (service, target_format, capabilities) from
+    its ``registry/<name>.yaml`` manifest.
+    """
+
+    def __init__(self, name: str, global_extra: dict, manifest: "BridgeManifest" = None):
+        self.name = name
+        self.manifest = manifest
+        self.service = getattr(manifest, "service", None) if manifest else None
+        self.target_format = list(getattr(manifest, "target_format", []) or []) if manifest else []
         bridge_key = f"bridge_{name}_"
         self.mention_patterns = self._get_opt(
             global_extra, bridge_key, "mention_patterns", "BRIDGE_MENTION_PATTERNS"
@@ -120,6 +248,7 @@ class BridgeAdapter(BasePlatformAdapter):
         super().__init__(config, platform)
         self.platform = platform
         extra = config.extra or {}
+        self._extra = extra
 
         # Bridge directory
         bridge_dir = (
@@ -137,14 +266,21 @@ class BridgeAdapter(BasePlatformAdapter):
         except (ValueError, TypeError):
             self._poll_interval = DEFAULT_POLL_INTERVAL
 
-        # Bridges to monitor
-        self._bridges: list[str] = extra.get("bridges", []) or []
+        # Bridges to monitor (populated dynamically from registry/)
+        self._bridges: list[str] = list(extra.get("bridges", []) or [])
         self._bridge_configs: dict[str, BridgeConfig] = {}
+        self._manifests: dict[str, BridgeManifest] = {}
+
+        # Registry directory (single source of truth for bridge identity)
+        self._registry_dir = (
+            self._bridge_dir / REGISTRY_DIR_NAME if self._bridge_dir else None
+        )
 
         # Internal state
         self._poll_task: Optional[asyncio.Task] = None
         self._cleanup_task: Optional[asyncio.Task] = None
         self._status_task: Optional[asyncio.Task] = None
+        self._registry_task: Optional[asyncio.Task] = None
         self._running = False
         self._seen_files: set[str] = set()
         self._reaction_handler: Optional[callable] = None
@@ -152,47 +288,60 @@ class BridgeAdapter(BasePlatformAdapter):
     # ── Lifecycle ────────────────────────────────────────────────────
 
     async def connect(self, **kwargs) -> bool:
-        """Start polling inbox directories."""
+        """Start polling inbox directories.
+
+        Bridges are discovered from ``registry/<name>.yaml`` manifests —
+        presence = registered, ``rm`` = unregistered. An initial
+        :meth:`_reconcile_registry` runs synchronously so the first poll
+        cycle sees all registered bridges, then a background
+        :meth:`_registry_loop` picks up manifests added/removed at runtime.
+        Returns ``False`` if no bridge directory exists or no bridges are
+        registered yet (the latter is not fatal in itself, but there is
+        nothing to poll).
+        """
         if not self._bridge_dir or not self._bridge_dir.exists():
             logger.error("Bridge directory does not exist: %s", self._bridge_dir)
             return False
 
         self._ensure_media_dirs()
 
-        # Auto-discover bridges
-        inbox_root = self._bridge_dir / "inbox"
-        if not self._bridges and inbox_root.exists():
-            self._bridges = sorted(
-                d.name for d in inbox_root.iterdir() if d.is_dir()
-            )
-            logger.info("Auto-discovered bridges: %s", self._bridges)
+        # Registry-based discovery (replaces the old one-shot inbox scan).
+        self._reconcile_registry_sync()
 
-        if not self._bridges:
-            logger.warning("No bridges configured and none auto-discovered")
-            return False
-
-        # Build per-bridge configs
-        extra = getattr(self.config, "extra", {}) or {}
-        for name in self._bridges:
-            self._bridge_configs[name] = BridgeConfig(name, extra)
-
+        # Whether or not any bridges are registered yet, the adapter boots
+        # and the registry loop keeps watching for manifests to appear at
+        # runtime. Zero bridges now is NOT a failure — the new registry
+        # design is "wait for manifests", not a one-shot scan.
         self._running = True
+        self._registry_task = asyncio.create_task(self._registry_loop())
         self._poll_task = asyncio.create_task(self._poll_loop())
         self._cleanup_task = asyncio.create_task(self._cleanup_loop())
         self._status_task = asyncio.create_task(self._status_loop())
         self._mark_connected()
-        logger.info(
-            "Bridge adapter connected — %d bridge(s), polling %s every %.1fs",
-            len(self._bridges),
-            self._bridge_dir,
-            self._poll_interval,
-        )
+
+        if not self._bridges:
+            logger.warning(
+                "No bridges registered in %s — adapter running, waiting for manifests",
+                self._registry_dir,
+            )
+        else:
+            logger.info(
+                "Bridge adapter connected — %d bridge(s) from registry, polling %s every %.1fs",
+                len(self._bridges),
+                self._bridge_dir,
+                self._poll_interval,
+            )
         return True
 
     async def disconnect(self) -> None:
         """Stop polling and cleanup tasks."""
         self._running = False
-        for task in (self._poll_task, self._cleanup_task, self._status_task):
+        for task in (
+            self._poll_task,
+            self._cleanup_task,
+            self._status_task,
+            self._registry_task,
+        ):
             if task:
                 task.cancel()
                 try:
@@ -202,8 +351,88 @@ class BridgeAdapter(BasePlatformAdapter):
         self._poll_task = None
         self._cleanup_task = None
         self._status_task = None
+        self._registry_task = None
         self._mark_disconnected()
         logger.info("Bridge adapter disconnected")
+
+    # ── Registry: runtime discovery ────────────────────────────────────
+
+    async def _registry_loop(self) -> None:
+        """Periodically scan ``registry/`` and reconcile bridges.
+
+        New manifests → register (create dirs, add to ``_bridges``).
+        Removed manifests → unregister (cleanup dirs, drop from ``_bridges``).
+        The poll/status/cleanup loops iterate over ``self._bridges`` directly,
+        so changes here take effect on their next cycle without a restart.
+        """
+        while self._running:
+            try:
+                await self._reconcile_registry()
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.warning("Registry reconcile error: %s", e)
+            await asyncio.sleep(REGISTRY_POLL_INTERVAL)
+
+    async def _reconcile_registry(self) -> None:
+        """Async wrapper around :meth:`_reconcile_registry_sync`.
+
+        Kept async so the registry loop can ``await`` it; the work itself is
+        synchronous (file I/O + in-memory bookkeeping).
+        """
+        self._reconcile_registry_sync()
+
+    def _reconcile_registry_sync(self) -> None:
+        """Diff the current registry against ``self._bridges`` and apply changes."""
+        if not self._registry_dir:
+            return
+        manifests = scan_registry(self._registry_dir)
+
+        # New bridges: register any manifest not yet known.
+        for name, m in manifests.items():
+            if name not in self._bridges:
+                self._register_bridge(name, m)
+                logger.info("Bridge '%s' angemeldet (registry)", name)
+
+        # Removed bridges: drop any known bridge no longer in the registry.
+        for name in list(self._bridges):
+            if name not in manifests:
+                self._unregister_bridge(name)
+                logger.info("Bridge '%s' abgemeldet (registry rm)", name)
+
+    def _register_bridge(self, name: str, manifest: BridgeManifest) -> None:
+        """Register a new bridge: track it and create its directory tree."""
+        self._bridges.append(name)
+        self._manifests[name] = manifest
+        self._bridge_configs[name] = BridgeConfig(name, self._extra, manifest=manifest)
+        if not self._bridge_dir:
+            return
+        # Create the per-bridge directory tree so the next poll cycle can
+        # use it immediately. inbox/outbox are created on demand by the
+        # wrapper/adapter, but pre-creating avoids first-cycle races.
+        (self._bridge_dir / "inbox" / name).mkdir(parents=True, exist_ok=True)
+        (self._bridge_dir / "outbox" / name).mkdir(parents=True, exist_ok=True)
+        (self._bridge_dir / "status" / name).mkdir(parents=True, exist_ok=True)
+        (self._bridge_dir / "media" / name / "incoming").mkdir(parents=True, exist_ok=True)
+        (self._bridge_dir / "media" / name / "outgoing").mkdir(parents=True, exist_ok=True)
+
+    def _unregister_bridge(self, name: str) -> None:
+        """Unregister a bridge: drop it and clean up its status/media dirs.
+
+        inbox/outbox are left in place (they may still contain in-flight
+        files the wrapper needs to drain); only status/ and media/ are
+        removed, since a re-registration would recreate them anyway.
+        """
+        if name in self._bridges:
+            self._bridges.remove(name)
+        self._manifests.pop(name, None)
+        self._bridge_configs.pop(name, None)
+        if not self._bridge_dir:
+            return
+        for sub in ("status", "media"):
+            d = self._bridge_dir / sub / name
+            if d.exists():
+                shutil.rmtree(d, ignore_errors=True)
 
     # ── Polling ─────────────────────────────────────────────────────
 
@@ -585,6 +814,18 @@ class BridgeAdapter(BasePlatformAdapter):
             if prefix in self._bridges:
                 return prefix
         return self._bridges[0] if self._bridges else "default"
+
+    def _validate_target(self, bridge: str, target: str) -> bool:
+        """Validate a target against a bridge's declared target_format.
+
+        Permissive by design: if the bridge has no manifest or declares no
+        ``target_format``, we accept anything (the full routing fallback —
+        T-053 — decides what happens when validation fails).
+        """
+        manifest = self._manifests.get(bridge)
+        if manifest is None:
+            return True  # unknown bridge → permissive
+        return manifest.accepts_target(target)
 
     async def _write_outbox(
         self, bridge: str, chat_id: str, text: str = "",

@@ -1,3 +1,5 @@
 bridge-adapter/
 __pycache__/
 *.pyc
+
+.hermes/

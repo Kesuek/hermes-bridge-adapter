@@ -23,6 +23,7 @@ Instead of each messaging platform (iMessage, Matrix, Telegram, WhatsApp, Signal
 
 ```
 <bridge_dir>/
+├── registry/<bridge>.yaml ← bridge manifest (presence = registered)
 ├── inbox/<bridge>/       ← written by external service, read by adapter
 ├── outbox/<bridge>/      ← written by adapter, read by external service
 ├── status/<bridge>/      ← written by external service, read by adapter
@@ -30,6 +31,35 @@ Instead of each messaging platform (iMessage, Matrix, Telegram, WhatsApp, Signal
     ├── <bridge>/incoming/  ← incoming attachments (wrapper → adapter)
     └── <bridge>/outgoing/  ← outgoing attachments (adapter → wrapper)
 ```
+
+## Bridge Self-Registration (Registry)
+
+Bridges register with the adapter by dropping a manifest into `registry/`:
+
+```yaml
+# registry/imsg.yaml
+name: imsg
+service: imessage
+host: mac-mini-01
+target_format: [email, phone, chat_id]
+capabilities: [text]
+```
+
+- **Presence of the manifest = the bridge is registered.** The adapter
+  polls `registry/` every few seconds and reconciles:
+  - a **new** manifest → the bridge is registered and its
+    `inbox/`, `outbox/`, `status/`, `media/` directories are created;
+  - the manifest is **removed** (`rm registry/imsg.yaml`) → the bridge is
+    deregistered and its `status/`/`media/` directories are cleaned up.
+- **No config edit needed to add a bridge** — just drop in a manifest (or
+  remove it to take the bridge down). The adapter picks up changes at
+  runtime without a restart.
+- **`target_format`** declares which target shapes the bridge accepts
+  (`email`, `phone`, `chat_id`). It is the basis for the routing check
+  that decides whether a target is routable on a bridge.
+- A bridge that is *registered* (manifest present) may still be
+  *disconnected* (`status/<bridge>/status.json` says `connected: false`);
+  the two are independent.
 
 ## JSON Schema
 
