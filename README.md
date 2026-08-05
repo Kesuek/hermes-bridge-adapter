@@ -244,4 +244,4 @@ See `imsg-wrapper.py` for a complete example (watch stream with auto-reconnect, 
 
 ## License
 
-Apache 2.0
+MIT
