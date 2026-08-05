@@ -242,6 +242,3 @@ See `imsg-wrapper.py` for a complete example (watch stream with auto-reconnect, 
 - Python 3.11+
 - No additional dependencies (uses Hermes Gateway SDK)
 
-## License
-
-MIT
