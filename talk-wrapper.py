@@ -113,6 +113,31 @@ def get_chat(room_token: str, limit: int = 20) -> list:
     )
 
 
+def get_participants(room_token: str) -> list:
+    """List participants of a room via API v4 (needs format=json in query)."""
+    return _api(
+        "GET",
+        f"/apps/spreed/api/v4/room/{room_token}/participants",
+        query={"format": "json"},
+    )
+
+
+def is_direct_room(room: dict) -> bool:
+    """True if the room is a 1:1 conversation (exactly 2 participants, not
+    the self-chats). Talk reports such chats as type=2 (group) when they're
+    not created through the one-to-one flow, so we resolve via participants.
+
+    A room is a direct chat if it has exactly two participants — the own
+    account and one other. Self/note rooms (type 4/6) are already excluded
+    by the caller, so here we only need the participant count.
+    """
+    token = room.get("token", "")
+    if not token:
+        return False
+    parts = get_participants(token)
+    return len(parts) == 2
+
+
 def send_message(room_token: str, text: str) -> bool:
     """POST a message to a room. Returns True on success (201)."""
     data = _api(
@@ -195,7 +220,7 @@ def write_inbox(data: dict):
     logger.info("Wrote inbox: %s (from %s)", path, data.get("sender", "?"))
 
 
-def build_inbox_msg(raw: dict, room_name: str, room_token: str) -> dict:
+def build_inbox_msg(raw: dict, room_name: str, room_token: str, chat_type: str) -> dict:
     return {
         "bridge": BRIDGE,
         "id": str(raw.get("id", uuid.uuid4())),
@@ -206,7 +231,7 @@ def build_inbox_msg(raw: dict, room_name: str, room_token: str) -> dict:
         "attachments": [],
         "chat": {
             "id": f"talk:{room_token}",
-            "type": "group",
+            "type": chat_type,
             "name": room_name,
         },
         "reply_to": None,
@@ -235,6 +260,7 @@ def poll_once(last_seen: dict) -> dict:
         if room.get("type") in SKIP_ROOM_TYPES:
             continue
         room_name = room.get("name", "") or room.get("displayName", "")
+        chat_type = "direct" if is_direct_room(room) else "group"
         msgs = get_chat(token)
         if not msgs:
             continue
@@ -252,7 +278,7 @@ def poll_once(last_seen: dict) -> dict:
             if not str(raw.get("message", "")).strip():
                 continue
             try:
-                write_inbox(build_inbox_msg(raw, room_name, token))
+                write_inbox(build_inbox_msg(raw, room_name, token, chat_type))
             except Exception as e:
                 logger.error("Failed writing inbox for msg %s: %s", mid, e)
         if max_id > last_id:
