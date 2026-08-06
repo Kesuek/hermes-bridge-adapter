@@ -572,6 +572,15 @@ class BridgeAdapter(BasePlatformAdapter):
         # Mention gating for group chats
         if chat_type != "direct" and not self._is_mentioned(text, bridge):
             logger.debug("Not mentioned in group chat, skipping: %s", filepath)
+            # Remove the file so it isn't re-seen forever. _seen_files already
+            # marks it, so without the unlink a dropped group message stays in
+            # the inbox AND in _seen_files → never processed again until the
+            # gateway restarts (the "needs a restart" bug). Mirror the
+            # is_user_allowed path which also unlinks.
+            try:
+                filepath.unlink()
+            except OSError:
+                pass
             return
 
         await self.handle_message(event)

@@ -435,6 +435,46 @@ def test_process_incoming_injects_routing_context(tmp_path):
     assert event.text.startswith("Hallo")
 
 
+def test_group_chat_without_mention_deletes_file(tmp_path):
+    """Mention-gated group message must delete the inbox file.
+
+    Regression for the "needs a gateway restart" bug: a group message that
+    fails mention gating was marked in _seen_files but never unlinked, so it
+    stayed in the inbox AND in _seen_files → never processed again until a
+    restart cleared _seen_files. The file must be removed on the spot.
+    """
+    from unittest.mock import AsyncMock
+
+    a = _make_adapter(tmp_path)
+    a._extra["allow_all"] = "true"
+    reg = a._bridge_dir / "registry"
+    reg.mkdir()
+    (reg / "imsg.yaml").write_text("name: imsg\ntarget_format: [email]\n", encoding="utf-8")
+    a._reconcile_registry_sync()
+    a.handle_message = AsyncMock()
+
+    inbox_file = tmp_path / "bridge" / "inbox" / "imsg" / "grp.json"
+    inbox_file.parent.mkdir(parents=True, exist_ok=True)
+    inbox_file.write_text("{}", encoding="utf-8")
+    a._seen_files.add(str(inbox_file.absolute()))
+
+    async def run():
+        await a._process_incoming(
+            "imsg",
+            {
+                "sender": "someone@example.com",
+                "text": "no @hermes here",
+                "chat": {"id": "imsg:grp", "type": "group"},
+            },
+            inbox_file,
+        )
+
+    asyncio.run(run())
+
+    a.handle_message.assert_not_awaited()
+    assert not inbox_file.exists(), "mention-gated file should be deleted"
+
+
 # ── T-053: routing fallback — unroutable target → SendResult error ──
 
 
