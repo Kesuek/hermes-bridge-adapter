@@ -137,8 +137,8 @@ def test_read_manifest_empty_file(tmp_path):
 
 def test_accepts_target_no_constraint_accepts_anything():
     m = BridgeManifest(name="x")  # no target_format
-    assert m.accepts_target("ronny@icloud.com")
-    assert m.accepts_target("Anja")
+    assert m.accepts_target("ronny@example.com")
+    assert m.accepts_target("alice")
     assert m.accepts_target("+15551234567")
 
 
@@ -149,12 +149,12 @@ def test_accepts_target_empty_rejected():
 
 def test_accepts_target_email_ok():
     m = BridgeManifest(name="imsg", target_format=["email"])
-    assert m.accepts_target("ronny@icloud.com")
+    assert m.accepts_target("ronny@example.com")
 
 
 def test_accepts_target_email_wrong():
     m = BridgeManifest(name="imsg", target_format=["email"])
-    assert not m.accepts_target("Anja")  # no @, no digit → not routable
+    assert not m.accepts_target("alice")  # no @, no digit → not routable
 
 
 def test_accepts_target_phone_ok():
@@ -164,7 +164,7 @@ def test_accepts_target_phone_ok():
 
 def test_accepts_target_phone_wrong():
     m = BridgeManifest(name="sms", target_format=["phone"])
-    assert not m.accepts_target("Anja")  # no digit
+    assert not m.accepts_target("alice")  # no digit
 
 
 def test_accepts_target_chat_id_ok():
@@ -174,9 +174,9 @@ def test_accepts_target_chat_id_ok():
 
 def test_accepts_target_multiple_formats():
     m = BridgeManifest(name="imsg", target_format=["email", "phone", "chat_id"])
-    assert m.accepts_target("ronny@icloud.com")
+    assert m.accepts_target("ronny@example.com")
     assert m.accepts_target("+15551234567")
-    assert m.accepts_target("Anja")  # chat_id accepts anything non-empty
+    assert m.accepts_target("alice")  # chat_id accepts anything non-empty
 
 
 # ── Task 2: scan_registry ─────────────────────────────────────────────
@@ -355,8 +355,8 @@ def test_validate_target_with_manifest(tmp_path):
         "name: imsg\ntarget_format: [email]\n", encoding="utf-8"
     )
     a._reconcile_registry_sync()
-    assert a._validate_target("imsg", "ronny@icloud.com") is True
-    assert a._validate_target("imsg", "Anja") is False
+    assert a._validate_target("imsg", "ronny@example.com") is True
+    assert a._validate_target("imsg", "alice") is False
 
 
 def test_validate_target_unknown_bridge_is_permissive(tmp_path):
@@ -416,9 +416,9 @@ def test_process_incoming_injects_routing_context(tmp_path):
         await a._process_incoming(
             "imsg",
             {
-                "sender": "ronny.pietschke@icloud.com",
+                "sender": "user@example.com",
                 "text": "Hallo",
-                "chat": {"id": "imsg:ronny.pietschke@icloud.com", "type": "direct"},
+                "chat": {"id": "imsg:user@example.com", "type": "direct"},
                 "reply_to": "abc123",
             },
             tmp_path / "x.json",
@@ -428,8 +428,8 @@ def test_process_incoming_injects_routing_context(tmp_path):
 
     a.handle_message.assert_awaited_once()
     event = a.handle_message.await_args[0][0]
-    assert "[Message from ronny.pietschke@icloud.com, bridge imsg," in event.text
-    assert "reply to imsg:ronny.pietschke@icloud.com" in event.text
+    assert "[Message from user@example.com, bridge imsg," in event.text
+    assert "reply to imsg:user@example.com" in event.text
     assert "reply_to abc123" in event.text
     # original text preserved
     assert event.text.startswith("Hallo")
@@ -485,7 +485,7 @@ def test_send_routable_writes_outbox(tmp_path):
     (reg / "imsg.yaml").write_text("name: imsg\ntarget_format: [email]\n", encoding="utf-8")
     a._reconcile_registry_sync()
 
-    res = asyncio.run(a.send("imsg:ronny.pietschke@icloud.com", "Hallo"))
+    res = asyncio.run(a.send("imsg:user@example.com", "Hallo"))
     assert res.success is True
     assert (a._bridge_dir / "outbox" / "imsg").exists()
 
@@ -509,7 +509,7 @@ def test_send_wrong_target_format_fails_with_routing_error(tmp_path):
     a._reconcile_registry_sync()
 
     # imsg accepts email only; a bare name is not a valid target
-    res = asyncio.run(a.send("imsg:Anja", "Hallo"))
+    res = asyncio.run(a.send("imsg:alice", "Hallo"))
     assert res.success is False
     assert "target" in res.error.lower()
     assert "imsg" in res.error

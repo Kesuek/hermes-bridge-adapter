@@ -18,7 +18,7 @@ Verified Talk API (Nextcloud 34.0.2 / Talk 24.0.3):
 
 Environment variables:
   BRIDGE_DIR             bridge directory (default: ~/.hermes/bridge)
-  NEXTCLOUD_HOST         e.g. https://cloud.rpon.eu
+  NEXTCLOUD_HOST         e.g. https://your-nextcloud.example.com
   NEXTCLOUD_USERNAME     Talk user (own messages are skipped)
   NEXTCLOUD_PASSWORD     app password
   BRIDGE_POLL_INTERVAL   inbound/outbox poll interval (default: 5.0)
@@ -154,7 +154,7 @@ def send_message(room_token: str, text: str) -> bool:
 MANIFEST_CONTENT = """\
 name: talk
 service: nextcloud-talk
-host: cloud.rpon.eu
+host: your-nextcloud.example.com
 target_format: [chat_id]
 capabilities: [text]
 """
