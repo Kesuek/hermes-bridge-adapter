@@ -495,15 +495,12 @@ class BridgeAdapter(BasePlatformAdapter):
             logger.warning("Inbox message missing 'sender', skipping %s", filepath)
             return
 
-        # User authorization per bridge
-        bc = self._bridge_configs.get(bridge)
-        if bc and not bc.is_user_allowed(sender):
-            logger.info("User '%s' not allowed on bridge '%s'", sender, bridge)
-            try:
-                filepath.unlink()
-            except OSError:
-                pass
-            return
+        # User authorization is handled by the Gateway framework
+        # (authz_mixin._is_user_authorized), which reads BRIDGE_ALLOWED_USERS
+        # via the plugin registry and default-denies. The adapter must NOT
+        # gate here: deleting the file before the gateway sees it would break
+        # the DM pairing flow (a new user's first DM would be dropped before
+        # the gateway can issue a pairing code). Let the framework decide.
 
         # Build session source
         thread_id = data.get("thread_id") or data.get("thread_root")
