@@ -4,19 +4,21 @@ Generic JSON-file-based bridge adapter for the [Hermes Agent](https://hermes-age
 
 Instead of each messaging platform (iMessage, Matrix, Telegram, WhatsApp, Signal) connecting directly to the Gateway, the Bridge Adapter provides a **shared JSON-file interface** — any external service can communicate with Hermes by reading/writing JSON files in a well-defined directory structure.
 
+**Terminology:** an **External Service** is the messaging platform itself (iMessage, Matrix, Telegram, …). An **External Service Wrapper** (or just *wrapper*) is the script that binds that platform to the JSON-file contract — it reads `outbox/`, writes `inbox/` and `status/`, and copies attachments. The adapter never talks to the platform directly; it only exchanges JSON files with the wrapper.
+
 ## How It Works
 
 ```
-┌─────────────────┐     JSON files      ┌──────────────────┐
-│  External        │  ┌──────────────┐   │  Hermes Gateway   │
-│  Service         │──▶│  inbox/      │──▶│  Bridge Adapter   │
-│  (imsg, Matrix,  │   │  <bridge>/   │   │  polls inbox/     │
-│   Telegram, …)   │◀──│  outbox/     │◀──│  writes outbox/   │
-│                  │   │  <bridge>/   │   │  dispatches       │
-│                  │   │  status/     │   │  MessageEvents    │
-│                  │   │  <bridge>/   │   │                   │
-│                  │   │  media/      │   │                   │
-└─────────────────┘  └──────────────┘   └──────────────────┘
+┌─────────────────────┐     JSON files      ┌──────────────────┐
+│  External Service   │  ┌──────────────┐   │  Hermes Gateway   │
+│  Wrapper            │──▶│  inbox/      │──▶│  Bridge Adapter   │
+│  (imsg, Matrix,     │   │  <bridge>/   │   │  polls inbox/     │
+│   Telegram, …)      │◀──│  outbox/     │◀──│  writes outbox/   │
+│                     │   │  <bridge>/   │   │  dispatches       │
+│                     │   │  status/     │   │  MessageEvents    │
+│                     │   │  <bridge>/   │   │                   │
+│                     │   │  media/      │   │                   │
+└─────────────────────┘  └──────────────┘   └──────────────────┘
 ```
 
 ## Directory Structure
@@ -24,9 +26,9 @@ Instead of each messaging platform (iMessage, Matrix, Telegram, WhatsApp, Signal
 ```
 <bridge_dir>/
 ├── registry/<bridge>.yaml ← bridge manifest (presence = registered)
-├── inbox/<bridge>/       ← written by external service, read by adapter
-├── outbox/<bridge>/      ← written by adapter, read by external service
-├── status/<bridge>/      ← written by external service, read by adapter
+├── inbox/<bridge>/       ← written by external service wrapper, read by adapter
+├── outbox/<bridge>/      ← written by adapter, read by external service wrapper
+├── status/<bridge>/      ← written by external service wrapper, read by adapter
 └── media/
     ├── <bridge>/incoming/  ← incoming attachments (wrapper → adapter)
     └── <bridge>/outgoing/  ← outgoing attachments (adapter → wrapper)
