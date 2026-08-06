@@ -202,7 +202,7 @@ EOF
 python3 myservice-wrapper.py
 ```
 
-To take a bridge down, remove its manifest (`rm registry/myservice.yaml`) — the adapter deregisters it and cleans up. See `imsg-wrapper.py` for a complete wrapper example.
+To take a bridge down, remove its manifest (`rm registry/myservice.yaml`) — the adapter deregisters it and cleans up. See `wrappers/imsg-wrapper.py` for a complete wrapper example.
 
 ### Directory structure with multiple bridges
 
@@ -236,7 +236,7 @@ A bridge wrapper is any script that:
 3. **Writes** incoming messages as JSON to `inbox/<bridge>/`
 4. **Writes** status to `status/<bridge>/`
 
-See `imsg-wrapper.py` for a complete example (watch stream with auto-reconnect, history safety net, and registry self-registration).
+See `wrappers/imsg-wrapper.py` for a complete example (watch stream with auto-reconnect, history safety net, and registry self-registration). Ready-made wrappers live in [`wrappers/`](wrappers/README.md) — each with a short "use this when" note.
 
 ## Requirements
 

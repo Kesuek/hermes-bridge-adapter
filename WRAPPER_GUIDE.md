@@ -451,7 +451,7 @@ All configuration should be done through environment variables so the wrapper wo
 
 ## Real-World Example
 
-See `imsg-wrapper.py` in this repository for a complete, production-ready wrapper that:
+See `wrappers/imsg-wrapper.py` in this repository for a complete, production-ready wrapper that:
 
 - Polls outbox via SSH to a remote macOS host
 - Streams incoming messages via `imsg watch --json`
