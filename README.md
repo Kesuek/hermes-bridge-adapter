@@ -2,9 +2,9 @@
 
 Generic JSON-file-based bridge adapter for the [Hermes Agent](https://hermes-agent.nousresearch.com) Gateway.
 
-Instead of each messaging platform (iMessage, Matrix, Telegram, WhatsApp, Signal) connecting directly to the Gateway, the Bridge Adapter provides a **shared JSON-file interface** — any external service can communicate with Hermes by reading/writing JSON files in a well-defined directory structure.
+Instead of each messaging platform connecting directly to the Gateway, the Bridge Adapter provides a **shared JSON-file interface** — any external service can communicate with Hermes by reading/writing JSON files in a well-defined directory structure.
 
-**Terminology:** an **External Service** is the messaging platform itself (iMessage, Matrix, Telegram, …). An **External Service Wrapper** (or just *wrapper*) is the script that binds that platform to the JSON-file contract — it reads `outbox/`, writes `inbox/` and `status/`, and copies attachments. The adapter never talks to the platform directly; it only exchanges JSON files with the wrapper.
+**Terminology:** an **External Service** is the messaging platform itself (your messaging service, a chatbot, …). An **External Service Wrapper** (or just *wrapper*) is the script that binds that platform to the JSON-file contract — it reads `outbox/`, writes `inbox/` and `status/`, and copies attachments. The adapter never talks to the platform directly; it only exchanges JSON files with the wrapper.
 
 ## How It Works
 
@@ -12,8 +12,8 @@ Instead of each messaging platform (iMessage, Matrix, Telegram, WhatsApp, Signal
 ┌─────────────────────┐     JSON files      ┌──────────────────┐
 │  External Service   │  ┌──────────────┐   │  Hermes Gateway   │
 │  Wrapper            │──▶│  inbox/      │──▶│  Bridge Adapter   │
-│  (imsg, Matrix,     │   │  <bridge>/   │   │  polls inbox/     │
-│   Telegram, …)      │◀──│  outbox/     │◀──│  writes outbox/   │
+│  (your messaging    │   │  <bridge>/   │   │  polls inbox/     │
+│   service, chatbot) │◀──│  outbox/     │◀──│  writes outbox/   │
 │                     │   │  <bridge>/   │   │  dispatches       │
 │                     │   │  status/     │   │  MessageEvents    │
 │                     │   │  <bridge>/   │   │                   │
@@ -179,30 +179,30 @@ capabilities: [text]
 
 Bridges **self-register** by dropping a manifest into `registry/`. The adapter polls `registry/` every few seconds and picks up new/removed manifests at runtime — no config change, no restart.
 
-To add a new bridge (e.g. Telegram):
+To add a new bridge (e.g. your messaging service):
 
 ```bash
 # 1. Write a registry manifest (this is the registration)
-cat > <bridge_dir>/registry/telegram.yaml <<'EOF'
-name: telegram
-service: telegram
+cat > <bridge_dir>/registry/myservice.yaml <<'EOF'
+name: myservice
+service: my-messaging-service
 host: my-host
 target_format: [chat_id]
 capabilities: [text]
 EOF
 
-# 2. The adapter creates inbox/outbox/status/media/telegram automatically
+# 2. The adapter creates inbox/outbox/status/media/myservice automatically
 
 # 3. Write a wrapper script that:
-#    - Reads outbox/telegram/*.json → sends via Telegram API
-#    - Writes incoming messages to inbox/telegram/*.json
-#    - Writes status to status/telegram/status.json
+#    - Reads outbox/myservice/*.json → sends via your service's API
+#    - Writes incoming messages to inbox/myservice/*.json
+#    - Writes status to status/myservice/status.json
 
 # 4. Start the wrapper
-python3 telegram-wrapper.py
+python3 myservice-wrapper.py
 ```
 
-To take a bridge down, remove its manifest (`rm registry/telegram.yaml`) — the adapter deregisters it and cleans up. See `imsg-wrapper.py` for a complete wrapper example.
+To take a bridge down, remove its manifest (`rm registry/myservice.yaml`) — the adapter deregisters it and cleans up. See `imsg-wrapper.py` for a complete wrapper example.
 
 ### Directory structure with multiple bridges
 
@@ -210,19 +210,19 @@ To take a bridge down, remove its manifest (`rm registry/telegram.yaml`) — the
 <bridge_dir>/
 ├── registry/
 │   ├── imsg.yaml          ← iMessage bridge manifest
-│   └── telegram.yaml      ← Telegram bridge manifest
+│   └── myservice.yaml     ← your messaging service bridge manifest
 ├── inbox/
 │   ├── imsg/              ← iMessage wrapper writes here
-│   └── telegram/          ← Telegram wrapper writes here
+│   └── myservice/         ← your messaging service wrapper writes here
 ├── outbox/
 │   ├── imsg/              ← Adapter writes iMessage replies here
-│   └── telegram/          ← Adapter writes Telegram replies here
+│   └── myservice/         ← Adapter writes your messaging service replies here
 ├── status/
 │   ├── imsg/
-│   └── telegram/
+│   └── myservice/
 └── media/
     ├── imsg/
-    └── telegram/
+    └── myservice/
 ```
 
 Each bridge is fully isolated — its own inbox, outbox, status, and media directories. Wrappers only touch their own namespace.
@@ -232,7 +232,7 @@ Each bridge is fully isolated — its own inbox, outbox, status, and media direc
 A bridge wrapper is any script that:
 
 1. **Reads** JSON files from `outbox/<bridge>/` (messages from Hermes)
-2. **Sends** them via the platform's API (iMessage, Matrix, Telegram, etc.)
+2. **Sends** them via the platform's API (your messaging service, chatbot, etc.)
 3. **Writes** incoming messages as JSON to `inbox/<bridge>/`
 4. **Writes** status to `status/<bridge>/`
 
