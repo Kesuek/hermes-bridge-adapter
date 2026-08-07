@@ -430,6 +430,9 @@ def test_process_incoming_injects_routing_context(tmp_path):
     event = a.handle_message.await_args[0][0]
     assert "[Message from user@example.com, bridge imsg," in event.text
     assert "reply to imsg~user@example.com" in event.text
+    # The session chat_id must be the routable address so a session reply
+    # routes back to the bridge (regression guard for T-056).
+    assert event.source.chat_id == "imsg~user@example.com"
     assert "reply_to abc123" in event.text
     # original text preserved
     assert event.text.startswith("Hallo")

@@ -502,11 +502,15 @@ class BridgeAdapter(BasePlatformAdapter):
         # the DM pairing flow (a new user's first DM would be dropped before
         # the gateway can issue a pairing code). Let the framework decide.
 
-        # Build session source
+        # Build session source. The session chat_id MUST be the routable
+        # address (<bridge>~<target>, T-056) so the gateway can route a
+        # session reply back to the bridge. The raw identity stays as the
+        # chat_name for display.
         thread_id = data.get("thread_id") or data.get("thread_root")
+        routable_chat_id = f"{bridge}~{chat_id}"
         source = SessionSource(
             platform=Platform("bridge-adapter"),
-            chat_id=chat_id,
+            chat_id=routable_chat_id,
             chat_name=chat_name or chat_id,
             chat_type=chat_type,
             user_id=sender,
@@ -519,7 +523,7 @@ class BridgeAdapter(BasePlatformAdapter):
         # stable for the duration of the message (no prompt-cache invalidation),
         # and lets the agent address replies as <bridge>~<target> without
         # digging into raw_message. (Bridge-target separator is ``~`` — T-056.)
-        routing_ctx = f"Message from {sender}, bridge {bridge}, reply to {bridge}~{chat_id}"
+        routing_ctx = f"Message from {sender}, bridge {bridge}, reply to {routable_chat_id}"
         if data.get("reply_to"):
             routing_ctx += f" (reply_to {data.get('reply_to')})"
         effective_text = f"{text}\n\n[{routing_ctx}]" if text else f"[{routing_ctx}]"
