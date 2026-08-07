@@ -182,8 +182,11 @@ def build_inbox_msg(raw: dict) -> dict:
             except OSError as e:
                 logger.warning("Failed to copy attachment: %s", e)
 
+    # Raw chat identity only — the adapter builds the full reply address
+    # ``imsg~<ident>`` (T-056). Keeping the bridge prefix out of chat.id
+    # means the wrapper stays agnostic of the addressing convention.
     ident = raw.get("chat_identifier", "") or raw.get("sender", "")
-    chat_id = f"imsg:{ident}" if ident else f"imsg:{raw.get('chat_id', '')}"
+    chat_id = ident or raw.get("chat_id", "")
 
     return {
         "bridge": BRIDGE,
@@ -366,12 +369,19 @@ def history_loop():
 def resolve_chat_identifier(target: str) -> str:
     """Resolve a chat target to a usable imsg chat-identifier.
 
-    Accepts 'imsg:<handle>' or bare '<handle>'. Numeric rowids are looked
-    up via `imsg chats` and mapped to the chat_identifier (sending to a
-    numeric rowid is unreliable on macOS 26).
+    Accepts 'imsg~<handle>' (T-056 separator), legacy 'imsg:<handle>', or
+    a bare '<handle>'. Numeric rowids are looked up via `imsg chats` and
+    mapped to the chat_identifier (sending to a numeric rowid is unreliable
+    on macOS 26).
     """
-    if ":" in target:
-        target = target.split(":", 1)[1].strip()
+    # Strip a leading bridge prefix (``imsg~`` current, ``imsg:`` legacy)
+    # so the wrapper stays agnostic of the addressing convention.
+    for sep in ("~", ":"):
+        if sep in target:
+            head, _, _ = target.partition(sep)
+            if head == BRIDGE:
+                target = target.split(sep, 1)[1].strip()
+                break
     target = target.strip()
     if not target:
         return ""

@@ -69,7 +69,7 @@ def send(name: str, target: str, text: str):
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         "attachments": [],
         "chat": {
-            "id": f"{name}:{target}",
+            "id": target,
             "type": "direct",
             "name": "Test-Chat",
         },

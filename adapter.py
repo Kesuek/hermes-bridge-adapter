@@ -517,9 +517,9 @@ class BridgeAdapter(BasePlatformAdapter):
         # Append a compact routing context line so the agent knows exactly
         # which bridge this message came from and where to reply. This is
         # stable for the duration of the message (no prompt-cache invalidation),
-        # and lets the agent address replies as <bridge>:<target> without
-        # digging into raw_message.
-        routing_ctx = f"Message from {sender}, bridge {bridge}, reply to {chat_id}"
+        # and lets the agent address replies as <bridge>~<target> without
+        # digging into raw_message. (Bridge-target separator is ``~`` — T-056.)
+        routing_ctx = f"Message from {sender}, bridge {bridge}, reply to {bridge}~{chat_id}"
         if data.get("reply_to"):
             routing_ctx += f" (reply_to {data.get('reply_to')})"
         effective_text = f"{text}\n\n[{routing_ctx}]" if text else f"[{routing_ctx}]"
@@ -647,7 +647,7 @@ class BridgeAdapter(BasePlatformAdapter):
                     f"Target '{chat_id}' is not routable: bridge prefix "
                     f"unknown. Registered bridges: "
                     f"{', '.join(self._bridges) or '(none)'}. "
-                    f"Address as <bridge>:<target>, e.g. imsg:user@example.com."
+                    f"Address as <bridge>~<target>, e.g. imsg~user@example.com."
                 ),
                 error_kind="routing",
             )
@@ -1019,8 +1019,8 @@ def register(ctx):
             "manifests in <bridge_dir>/registry/. To see which bridges are "
             "registered and their accepted target formats, read those manifest "
             "files (e.g. registry/imsg.yaml has target_format). To send a "
-            "message, address the target as <bridge>:<target>, e.g. "
-            "imsg:ronny.pietschke@icloud.com for iMessage. Match the target to "
+            "message, address the target as <bridge>~<target>, e.g. "
+            "imsg~ronny.pietschke@icloud.com for iMessage. Match the target to "
             "the bridge's target_format (email / phone / chat_id)."
         ),
     )

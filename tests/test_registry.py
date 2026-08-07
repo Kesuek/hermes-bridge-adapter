@@ -319,7 +319,7 @@ def test_poll_all_picks_up_newly_registered_bridge(tmp_path):
     inbox_a = a._bridge_dir / "inbox" / "a"
     inbox_a.mkdir(parents=True, exist_ok=True)
     (inbox_a / "msg.json").write_text(
-        '{"sender":"u1","text":"hi","chat":{"id":"a:c1","type":"direct"}}',
+        '{"sender":"u1","text":"hi","chat":{"id":"c1","type":"direct"}}',
         encoding="utf-8",
     )
     asyncio.run(a._poll_all())
@@ -418,7 +418,7 @@ def test_process_incoming_injects_routing_context(tmp_path):
             {
                 "sender": "user@example.com",
                 "text": "Hallo",
-                "chat": {"id": "imsg:user@example.com", "type": "direct"},
+                "chat": {"id": "user@example.com", "type": "direct"},
                 "reply_to": "abc123",
             },
             tmp_path / "x.json",
@@ -429,7 +429,7 @@ def test_process_incoming_injects_routing_context(tmp_path):
     a.handle_message.assert_awaited_once()
     event = a.handle_message.await_args[0][0]
     assert "[Message from user@example.com, bridge imsg," in event.text
-    assert "reply to imsg:user@example.com" in event.text
+    assert "reply to imsg~user@example.com" in event.text
     assert "reply_to abc123" in event.text
     # original text preserved
     assert event.text.startswith("Hallo")
@@ -464,7 +464,7 @@ def test_group_chat_without_mention_deletes_file(tmp_path):
             {
                 "sender": "someone@example.com",
                 "text": "no @hermes here",
-                "chat": {"id": "imsg:grp", "type": "group"},
+                "chat": {"id": "grp", "type": "group"},
             },
             inbox_file,
         )
@@ -538,7 +538,7 @@ def test_send_routable_writes_outbox(tmp_path):
     (reg / "imsg.yaml").write_text("name: imsg\ntarget_format: [email]\n", encoding="utf-8")
     a._reconcile_registry_sync()
 
-    res = asyncio.run(a.send("imsg:user@example.com", "Hallo"))
+    res = asyncio.run(a.send("imsg~user@example.com", "Hallo"))
     assert res.success is True
     assert (a._bridge_dir / "outbox" / "imsg").exists()
 
@@ -546,7 +546,7 @@ def test_send_routable_writes_outbox(tmp_path):
 def test_send_unknown_bridge_fails_with_routing_error(tmp_path):
     a = _make_adapter(tmp_path)
     # No manifest for "talk" → not registered → unroutable
-    res = asyncio.run(a.send("talk:some-chat", "Hallo"))
+    res = asyncio.run(a.send("talk~some-chat", "Hallo"))
     assert res.success is False
     assert "talk" in res.error
     assert "bridge" in res.error.lower()
@@ -562,7 +562,7 @@ def test_send_wrong_target_format_fails_with_routing_error(tmp_path):
     a._reconcile_registry_sync()
 
     # imsg accepts email only; a bare name is not a valid target
-    res = asyncio.run(a.send("imsg:alice", "Hallo"))
+    res = asyncio.run(a.send("imsg~alice", "Hallo"))
     assert res.success is False
     assert "target" in res.error.lower()
     assert "imsg" in res.error

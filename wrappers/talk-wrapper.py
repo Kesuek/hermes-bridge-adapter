@@ -230,7 +230,7 @@ def build_inbox_msg(raw: dict, room_name: str, room_token: str, chat_type: str) 
         "timestamp": raw.get("timestamp", ""),
         "attachments": [],
         "chat": {
-            "id": f"talk:{room_token}",
+            "id": room_token,
             "type": chat_type,
             "name": room_name,
         },
@@ -302,9 +302,13 @@ def inbound_loop():
 
 
 def extract_token(target: str) -> str:
-    """Target is 'talk:<room_token>' or bare '<room_token>'. Return the token."""
-    if ":" in target:
-        return target.split(":", 1)[1].strip()
+    """Target is 'talk~<room_token>' (T-056), legacy 'talk:<room_token>',
+    or bare '<room_token>'. Return the token."""
+    for sep in ("~", ":"):
+        if sep in target:
+            head, _, _ = target.partition(sep)
+            if head == BRIDGE:
+                return target.split(sep, 1)[1].strip()
     return target.strip()
 
 
