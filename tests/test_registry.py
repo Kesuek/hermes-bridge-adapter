@@ -475,6 +475,20 @@ def test_group_chat_without_mention_deletes_file(tmp_path):
     assert not inbox_file.exists(), "mention-gated file should be deleted"
 
 
+# ── T-056: bridge-target separator `~` ────────────────────────────────
+
+
+def test_resolve_bridge_tilde_separator(tmp_path):
+    a = _make_adapter(tmp_path)
+    reg = a._bridge_dir / "registry"
+    reg.mkdir()
+    (reg / "imsg.yaml").write_text("name: imsg\n", encoding="utf-8")
+    (reg / "talk.yaml").write_text("name: talk\n", encoding="utf-8")
+    a._reconcile_registry_sync()
+    assert a._resolve_bridge("imsg~user@example.com") == "imsg"
+    assert a._resolve_bridge("talk~room1") == "talk"
+
+
 # ── T-053: routing fallback — unroutable target → SendResult error ──
 
 

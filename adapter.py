@@ -861,9 +861,16 @@ class BridgeAdapter(BasePlatformAdapter):
     # ── Bridge helpers ───────────────────────────────────────────────
 
     def _resolve_bridge(self, chat_id: str) -> str:
-        """Determine which bridge a chat_id belongs to (defaults to first)."""
-        if ":" in chat_id:
-            prefix, _, rest = chat_id.partition(":")
+        """Determine which bridge a chat_id belongs to (defaults to first).
+
+        The bridge-target separator is ``~`` (T-056): a chat_id of the form
+        ``<bridge>~<target>`` routes to that bridge if its prefix is
+        registered. ``~`` was chosen so it does not collide with any target
+        format (email, phone, chat_id) or the platform separator ``:`` used
+        by the cron scheduler.
+        """
+        if "~" in chat_id:
+            prefix, _, _ = chat_id.partition("~")
             if prefix in self._bridges:
                 return prefix
         return self._bridges[0] if self._bridges else "default"
