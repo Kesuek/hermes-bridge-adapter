@@ -652,8 +652,11 @@ class BridgeAdapter(BasePlatformAdapter):
                 error_kind="routing",
             )
 
-        # Extract the target portion (after "<bridge>:") for format validation
-        target_part = chat_id.split(":", 1)[1] if ":" in chat_id else chat_id
+        # Extract the target portion (after "<bridge>~") for format validation.
+        # The ~ separator (T-056) keeps the bridge prefix out of the target
+        # so it can't mask an invalid target (e.g. a digit in the prefix
+        # satisfying the ``phone`` digit check).
+        target_part = chat_id.split("~", 1)[1] if "~" in chat_id else chat_id
         if not self._validate_target(bridge, target_part):
             manifest = self._manifests.get(bridge)
             formats = ", ".join(manifest.target_format) if manifest else "any"

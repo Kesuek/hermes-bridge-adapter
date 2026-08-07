@@ -499,6 +499,35 @@ def test_resolve_bridge_or_none_tilde(tmp_path):
     assert a._resolve_bridge_or_none("talk~room1") is None  # talk not registered
 
 
+def test_send_tilde_separator_writes_outbox(tmp_path):
+    a = _make_adapter(tmp_path)
+    reg = a._bridge_dir / "registry"
+    reg.mkdir()
+    (reg / "imsg.yaml").write_text("name: imsg\ntarget_format: [email]\n", encoding="utf-8")
+    a._reconcile_registry_sync()
+    res = asyncio.run(a.send("imsg~user@example.com", "Hallo"))
+    assert res.success is True
+    assert (a._bridge_dir / "outbox" / "imsg").exists()
+
+
+def test_send_tilde_separator_strips_prefix_for_validation(tmp_path):
+    """Target validation must run on the bare target (after ``~``), not on
+    the full ``<bridge>~<target>`` string — otherwise the bridge prefix
+    could mask an invalid target. Here ``sms2`` (phone-only) with target
+    ``alice`` (no digits) must fail routing: with the old ``:`` split the
+    whole ``sms2~alice`` was validated and the ``2`` in the prefix satisfied
+    the ``phone`` digit check, misrouting a non-phone target."""
+    a = _make_adapter(tmp_path)
+    reg = a._bridge_dir / "registry"
+    reg.mkdir()
+    (reg / "sms2.yaml").write_text("name: sms2\ntarget_format: [phone]\n", encoding="utf-8")
+    a._reconcile_registry_sync()
+    res = asyncio.run(a.send("sms2~alice", "Hallo"))
+    assert res.success is False
+    assert res.error_kind == "routing"
+    assert "alice" in res.error
+
+
 # ── T-053: routing fallback — unroutable target → SendResult error ──
 
 
