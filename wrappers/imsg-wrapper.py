@@ -22,7 +22,8 @@ Design (T-052):
 
 Environment variables:
   BRIDGE_DIR           bridge directory (default: ~/.hermes/bridge)
-  IMSG_SSH_HOST        SSH target (default: autologin@100.64.0.5)
+  IMSG_SSH_HOST        SSH target (required; e.g. user@host)
+  IMSG_OWN_HANDLES     comma-separated own handles/IDs (own messages skipped)
   BRIDGE_POLL_INTERVAL outbox poll interval in seconds (default: 1.0)
   BRIDGE_HISTORY_POLL_INTERVAL history safety-net poll (default: 30.0)
   BRIDGE_HISTORY_LIMIT messages checked per chat per history poll (default: 10)
@@ -50,7 +51,7 @@ logger = logging.getLogger("imsg-wrapper")
 
 BRIDGE_DIR = Path(os.environ.get("BRIDGE_DIR", str(Path.home() / ".hermes" / "bridge")))
 BRIDGE = "imsg"
-SSH_HOST = os.environ.get("IMSG_SSH_HOST", "autologin@100.64.0.5")
+SSH_HOST = os.environ.get("IMSG_SSH_HOST", "").strip()
 POLL_INTERVAL = float(os.environ.get("BRIDGE_POLL_INTERVAL", "1.0"))
 HISTORY_POLL_INTERVAL = float(os.environ.get("BRIDGE_HISTORY_POLL_INTERVAL", "30.0"))
 HISTORY_LIMIT = int(os.environ.get("BRIDGE_HISTORY_LIMIT", "10"))
@@ -61,7 +62,10 @@ STATUS_FILE = BRIDGE_DIR / "status" / BRIDGE / "status.json"
 MANIFEST_FILE = BRIDGE_DIR / "registry" / "imsg.yaml"
 
 # Handles considered "ours" (own messages) — never re-injected.
-OWN_HANDLES = {"flix2026@icloud.com", "flix2026"}
+# Set IMSG_OWN_HANDLES to a comma-separated list of your own handles/IDs.
+OWN_HANDLES = {
+    h.strip() for h in os.environ.get("IMSG_OWN_HANDLES", "").split(",") if h.strip()
+}
 
 SSH_BASE = [
     "ssh",

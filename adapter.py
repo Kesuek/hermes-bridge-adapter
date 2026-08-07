@@ -1105,7 +1105,7 @@ def register(ctx):
             "registered and their accepted target formats, read those manifest "
             "files (e.g. registry/imsg.yaml has target_format). To send a "
             "message, address the target as <bridge>~<target>, e.g. "
-            "imsg~ronny.pietschke@icloud.com for iMessage. Match the target to "
+            "imsg~user@example.com for iMessage. Match the target to "
             "the bridge's target_format (email / phone / chat_id)."
         ),
     )
