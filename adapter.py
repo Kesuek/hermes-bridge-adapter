@@ -989,6 +989,83 @@ def validate_config(config) -> bool:
     return bool(extra.get("bridge_dir") or os.getenv("BRIDGE_DIR"))
 
 
+def _resolve_bridge_dir(pconfig) -> Optional[Path]:
+    """Resolve the bridge directory from a PlatformConfig or env."""
+    extra = getattr(pconfig, "extra", {}) or {}
+    bridge_dir = extra.get("bridge_dir") or os.getenv("BRIDGE_DIR", "").strip()
+    return Path(bridge_dir) if bridge_dir else None
+
+
+async def _standalone_send(pconfig, chat_id, message, thread_id=None,
+                           media_files=None, force_document=False) -> dict:
+    """Out-of-process cron delivery for the bridge adapter.
+
+    Implements the ``standalone_sender_fn`` contract so ``deliver=bridge-adapter``
+    cron jobs can write to the outbox even when the cron process runs separately
+    from the gateway (no live adapter). Mirrors ``BridgeAdapter._write_outbox``:
+    parses ``<bridge>~<target>``, validates the target against the bridge's
+    ``target_format``, and writes a JSON file to ``outbox/<bridge>/``.
+
+    Returns a dict with ``success``/``error`` per the framework contract.
+    """
+    if not chat_id:
+        return {"error": "bridge standalone send: empty chat_id"}
+
+    bridge_dir = _resolve_bridge_dir(pconfig)
+    if bridge_dir is None:
+        return {"error": "bridge standalone send: BRIDGE_DIR not configured"}
+
+    # Parse <bridge>~<target> (T-056 separator).
+    if "~" in chat_id:
+        bridge, _, target = chat_id.partition("~")
+    else:
+        bridge, target = chat_id, chat_id
+
+    # Validate the target against the bridge's declared target_format.
+    manifest = None
+    manifest_path = bridge_dir / "registry" / f"{bridge}.yaml"
+    try:
+        if manifest_path.exists():
+            manifest = read_manifest(manifest_path)
+    except Exception:
+        manifest = None
+    if manifest is not None and not manifest.accepts_target(target):
+        formats = ", ".join(manifest.target_format) or "any"
+        return {
+            "error": (
+                f"Target '{target}' does not match bridge '{bridge}' "
+                f"target_format ({formats}). Address as <bridge>~<target>."
+            )
+        }
+
+    # Write the outbox JSON (same shape as _write_outbox).
+    outbox_dir = bridge_dir / "outbox" / bridge
+    try:
+        outbox_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        return {"error": f"bridge standalone send: cannot create outbox dir: {e}"}
+
+    msg_id = str(uuid.uuid4())
+    outbox = {
+        "bridge": bridge,
+        "id": f"out_{msg_id[:8]}",
+        "target": target,
+        "text": str(message),
+        "attachments": [],
+        "typing": False,
+        "reply_to": None,
+        "thread_id": thread_id,
+        "metadata": {},
+    }
+    filepath = outbox_dir / f"{msg_id}.json"
+    try:
+        filepath.write_text(json.dumps(outbox, ensure_ascii=False, indent=2), "utf-8")
+    except OSError as e:
+        return {"error": f"bridge standalone send: write failed: {e}"}
+    return {"success": True, "platform": "bridge-adapter", "chat_id": chat_id,
+            "message_id": outbox["id"]}
+
+
 def env_enablement_fn() -> Optional[dict]:
     """Seed PlatformConfig.extra from env vars before adapter construction."""
     bridge_dir = os.getenv("BRIDGE_DIR", "").strip()
@@ -1015,6 +1092,10 @@ def register(ctx):
         allowed_users_env="BRIDGE_ALLOWED_USERS",
         allow_all_env="BRIDGE_ALLOW_ALL_USERS",
         cron_deliver_env_var="BRIDGE_HOME_CHANNEL",
+        # Out-of-process cron delivery. Without this hook, deliver=bridge-adapter
+        # cron jobs fail with "No live adapter" when cron runs separately from
+        # the gateway (T-057).
+        standalone_sender_fn=_standalone_send,
         max_message_length=MAX_MESSAGE_LENGTH,
         emoji="🔌",
         platform_hint=(

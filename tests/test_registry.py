@@ -6,6 +6,7 @@ validation, and the runtime reconcile logic. They run against the
 available because the plugin is loaded from a Hermes installation.
 """
 import asyncio
+import json
 import os
 import sys
 from pathlib import Path
@@ -575,3 +576,66 @@ def test_send_without_any_bridges_fails(tmp_path):
     a = _make_adapter(tmp_path)
     res = asyncio.run(a.send("anything", "Hallo"))
     assert res.success is False
+
+
+# ── T-057: standalone_sender_fn (out-of-process cron delivery) ──────
+
+
+def _make_pconfig(bridge_dir: Path):
+    """Build a PlatformConfig with bridge_dir in extra (like env_enablement_fn)."""
+    from gateway.config import PlatformConfig
+    return PlatformConfig(enabled=True, extra={"bridge_dir": str(bridge_dir)})
+
+
+def test_standalone_send_writes_outbox(tmp_path):
+    from adapter import _standalone_send
+    bridge_dir = tmp_path / "bridge"
+    bridge_dir.mkdir()
+    reg = bridge_dir / "registry"
+    reg.mkdir()
+    (reg / "imsg.yaml").write_text("name: imsg\ntarget_format: [email]\n", encoding="utf-8")
+    pconfig = _make_pconfig(bridge_dir)
+
+    res = asyncio.run(_standalone_send(pconfig, "imsg~user@example.com", "Hallo cron"))
+    assert res.get("success") is True
+    outbox = bridge_dir / "outbox" / "imsg"
+    files = list(outbox.glob("*.json"))
+    assert len(files) == 1
+    data = json.loads(files[0].read_text("utf-8"))
+    assert data["bridge"] == "imsg"
+    assert data["target"] == "user@example.com"
+    assert data["text"] == "Hallo cron"
+
+
+def test_standalone_send_wrong_target_format_fails(tmp_path):
+    from adapter import _standalone_send
+    bridge_dir = tmp_path / "bridge"
+    bridge_dir.mkdir()
+    reg = bridge_dir / "registry"
+    reg.mkdir()
+    (reg / "imsg.yaml").write_text("name: imsg\ntarget_format: [email]\n", encoding="utf-8")
+    pconfig = _make_pconfig(bridge_dir)
+
+    res = asyncio.run(_standalone_send(pconfig, "imsg~alice", "Hallo"))
+    assert res.get("success") is not True
+    assert "target" in res.get("error", "").lower()
+    # No outbox written for an invalid target
+    assert not (bridge_dir / "outbox" / "imsg").exists()
+
+
+def test_standalone_send_no_bridge_dir_fails(tmp_path):
+    from adapter import _standalone_send
+    # No bridge_dir in extra and no BRIDGE_DIR env → _resolve_bridge_dir returns None
+    from gateway.config import PlatformConfig
+    pconfig = PlatformConfig(enabled=True, extra={})
+    res = asyncio.run(_standalone_send(pconfig, "imsg~user@example.com", "Hallo"))
+    assert res.get("success") is not True
+    assert "BRIDGE_DIR" in res.get("error", "")
+
+
+def test_standalone_send_empty_chat_id_fails(tmp_path):
+    from adapter import _standalone_send
+    pconfig = _make_pconfig(tmp_path / "bridge")
+    res = asyncio.run(_standalone_send(pconfig, "", "Hallo"))
+    assert res.get("success") is not True
+    assert "empty" in res.get("error", "").lower()
