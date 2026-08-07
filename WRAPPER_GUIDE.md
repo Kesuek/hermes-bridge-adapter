@@ -169,7 +169,7 @@ def write_inbox(sender, text, chat_id, chat_name="", attachments=None, reply_to=
   "sender_name": "Alice",
   "text": "Hello Hermes!",
   "chat": {
-    "id": "mybridge:chat_99",
+    "id": "chat_99",
     "type": "direct",
     "name": "Alice"
   },
@@ -196,7 +196,7 @@ def write_inbox(sender, text, chat_id, chat_name="", attachments=None, reply_to=
 | `sender` | string | ✅ | User ID (used for routing) |
 | `sender_name` | string | | Display name |
 | `text` | string | | Message text |
-| `chat.id` | string | ✅ | **Must include bridge prefix!** e.g. `"mybridge:chat_99"` |
+| `chat.id` | string | ✅ | **Raw chat identity** (no bridge prefix), e.g. `"chat_99"` |
 | `chat.type` | string | | `"direct"` (default) or `"group"` |
 | `chat.name` | string | | Human-readable chat name |
 | `attachments` | array | | List of attachment objects |
@@ -204,7 +204,7 @@ def write_inbox(sender, text, chat_id, chat_name="", attachments=None, reply_to=
 | `thread_id` | string | | Thread identifier |
 | `thread_root` | string | | Root message ID of the thread |
 
-**⚠️ Important: The `chat.id` must include the bridge prefix** (e.g. `"mybridge:chat_99"`). The adapter uses this prefix to route replies back to the correct outbox. Without it, the adapter won't know which bridge the message belongs to.
+**⚠️ Important: The `chat.id` must be the RAW chat identity** (e.g. `"chat_99"`), **without** a bridge prefix. The adapter builds the full routable reply address (`<bridge>~<target>`) itself. If you include a prefix, the adapter would double-prefix it and replies would fail to route. The wrapper stays agnostic of the addressing convention.
 
 ### 3. Handle Attachments
 
@@ -335,7 +335,7 @@ def write_inbox(sender, text, chat_id, chat_name="", attachments=None,
         "sender_name": sender,
         "text": text,
         "chat": {
-            "id": f"{BRIDGE}:{chat_id}",
+            "id": chat_id,
             "type": "direct",
             "name": chat_name or chat_id,
         },
@@ -399,7 +399,7 @@ def write_reaction(message_id, user_id, reaction, chat_id):
         "reaction": reaction,             # e.g. "👍"
         "sender": user_id,
         "message_id": message_id,         # ID of the message being reacted to
-        "chat": {"id": f"{BRIDGE}:{chat_id}"},
+        "chat": {"id": chat_id},
     }
     path = inbox_dir / f"{msg['id']}.json"
     path.write_text(json.dumps(msg, ensure_ascii=False, indent=2), "utf-8")
@@ -435,7 +435,7 @@ All configuration should be done through environment variables so the wrapper wo
 
 3. Simulate an incoming message:
    ```bash
-   echo '{"id":"test_1","type":"message","sender":"test_user","text":"Hello!","chat":{"id":"mybridge:test_chat","type":"direct"}}' \
+   echo '{"id":"test_1","type":"message","sender":"test_user","text":"Hello!","chat":{"id":"test_chat","type":"direct"}}' \
      > <bridge_dir>/inbox/mybiridge/test_1.json
    ```
 
