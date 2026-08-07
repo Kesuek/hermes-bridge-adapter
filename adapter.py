@@ -879,18 +879,19 @@ class BridgeAdapter(BasePlatformAdapter):
         """Resolve the bridge for a chat_id, or ``None`` if not routable.
 
         Unlike :meth:`_resolve_bridge`, this does NOT fall back to a default
-        bridge. Returns the bridge only when the ``<bridge>:`` prefix is an
-        actually registered bridge (routing fallback / T-053).
+        bridge. Returns the bridge only when the ``<bridge>~`` prefix is an
+        actually registered bridge (routing fallback / T-053). The bridge-
+        target separator is ``~`` (T-056).
         """
-        if ":" in chat_id:
-            prefix, _, _ = chat_id.partition(":")
+        if "~" in chat_id:
+            prefix, _, _ = chat_id.partition("~")
             if prefix in self._bridges:
                 return prefix
         # Bare chat_id without a registered bridge prefix is unroutable
         if not self._bridges:
             return None
-        # A bare target with no ':' and exactly one bridge → route to it
-        if ":" not in chat_id and len(self._bridges) == 1:
+        # A bare target with no '~' and exactly one bridge → route to it
+        if "~" not in chat_id and len(self._bridges) == 1:
             return self._bridges[0]
         return None
 

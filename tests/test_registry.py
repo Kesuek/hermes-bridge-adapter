@@ -489,6 +489,16 @@ def test_resolve_bridge_tilde_separator(tmp_path):
     assert a._resolve_bridge("talk~room1") == "talk"
 
 
+def test_resolve_bridge_or_none_tilde(tmp_path):
+    a = _make_adapter(tmp_path)
+    reg = a._bridge_dir / "registry"
+    reg.mkdir()
+    (reg / "imsg.yaml").write_text("name: imsg\n", encoding="utf-8")
+    a._reconcile_registry_sync()
+    assert a._resolve_bridge_or_none("imsg~user@example.com") == "imsg"
+    assert a._resolve_bridge_or_none("talk~room1") is None  # talk not registered
+
+
 # ── T-053: routing fallback — unroutable target → SendResult error ──
 
 
