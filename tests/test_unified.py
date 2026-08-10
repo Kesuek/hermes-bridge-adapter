@@ -1101,16 +1101,50 @@ def test_relay_dedup_same_person_two_bridges(tmp_path):
     assert len(talk_files) == 1, "relay must dedup same address, not same person"
 
 
-def test_unified_exit_clears_active_thread(tmp_path):
+def test_unified_exit_pauses_thread_routing(tmp_path):
     a = _make_adapter(tmp_path)
     a._load_unified_threads()
     a._load_active_threads()
+    a._load_paused_threads()
     a._cmd_unified_create("imsg", {"sender": "ronny", "chat": {"id": "u1"}}, "projekt")
     a._cmd_unified_switch("imsg", {"sender": "ronny"}, "projekt")
     assert a._active_threads["ronny"] == "projekt"
     result = a._cmd_unified_exit("imsg", {"sender": "ronny"})
     assert "exited" in result.lower()
-    assert "ronny" not in a._active_threads
+    # T-068: exit pauses the thread; the user stays a member but the
+    # paused_threads map records the exit.
+    assert "projekt" in a._paused_threads["ronny"]
+
+
+def test_paused_thread_does_not_route_to_unified(tmp_path):
+    """T-068: a member who exited (paused) a thread writes a normal DM,
+    not into the shared unified session."""
+    from unittest.mock import AsyncMock
+    a = _make_adapter(tmp_path)
+    a._extra["allow_all"] = "true"
+    a._load_unified_threads()
+    a._load_active_threads()
+    a._load_paused_threads()
+    a._cmd_unified_create("talk", {"sender": "ronny", "chat": {"id": "t1"}}, "projekt")
+    # Pause the thread as ronny.
+    a._paused_threads.setdefault("ronny", set()).add("projekt")
+    a.handle_message = AsyncMock()
+    inbox_file = tmp_path / "bridge" / "inbox" / "talk" / "p.json"
+    inbox_file.parent.mkdir(parents=True, exist_ok=True)
+    inbox_file.write_text("{}", encoding="utf-8")
+
+    async def run():
+        await a._process_incoming(
+            "talk",
+            {"sender": "ronny", "text": "Hallo ohne Thread",
+             "chat": {"id": "t1", "type": "direct"}},
+            inbox_file,
+        )
+    asyncio.run(run())
+    event = a.handle_message.await_args[0][0]
+    # Routed to the normal per-bridge chat, NOT into unified~projekt.
+    assert event.source.chat_id == "talk~t1"
+    assert "unified" not in event.source.chat_id
 
 
 def test_unified_alias_u_shortcut(tmp_path):

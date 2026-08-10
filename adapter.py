@@ -312,6 +312,12 @@ class BridgeAdapter(BasePlatformAdapter):
         # ``_find_unified_for_member`` finds no membership match.
         self._active_threads: dict[str, str] = {}
 
+        # Paused unified threads (T-068): {person → {thread_name}}. Set by
+        # ``/unified exit`` to stop routing a member chat into its unified
+        # thread (the user stays a member but writes a normal DM with the
+        # agent). Cleared by ``/unified switch`` / ``join``.
+        self._paused_threads: dict[str, set[str]] = {}
+
         # Pending identity claims (T-065): {claim_id → {code, source, target,
         # expires}}. A ``/unified identity claim <bridge>~<target>`` creates an
         # entry and sends a code to the target bridge; ``/unified identity
@@ -370,6 +376,10 @@ class BridgeAdapter(BasePlatformAdapter):
         # Load the active_thread map (T-064) so /unified switch persists
         # across restarts.
         self._load_active_threads()
+
+        # Load paused threads (T-068) so /unified exit persists across
+        # restarts.
+        self._load_paused_threads()
 
         # Load pending identity claims (T-065) so an in-flight challenge-
         # response survives an adapter restart.
@@ -752,6 +762,36 @@ class BridgeAdapter(BasePlatformAdapter):
         if not p:
             return
         self._atomic_write_json(p, self._active_threads)
+
+    # ── Paused threads (T-068) ─────────────────────────────────────────────
+
+    def _paused_threads_path(self) -> Path:
+        """Path to the ``paused_threads.json`` persistence file."""
+        return self._bridge_dir / "paused_threads.json" if self._bridge_dir else Path()
+
+    def _load_paused_threads(self) -> None:
+        """Load paused threads from ``paused_threads.json`` (best-effort)."""
+        self._paused_threads = {}
+        p = self._paused_threads_path()
+        if not p or not p.exists():
+            return
+        try:
+            data = json.loads(p.read_text("utf-8"))
+            if isinstance(data, dict):
+                self._paused_threads = {
+                    k: set(v) if isinstance(v, list) else set()
+                    for k, v in data.items()
+                }
+        except (json.JSONDecodeError, OSError) as e:
+            logger.warning("Bad paused_threads.json: %s", e)
+
+    def _save_paused_threads(self) -> None:
+        """Persist paused threads to ``paused_threads.json`` (atomic write)."""
+        p = self._paused_threads_path()
+        if not p:
+            return
+        serializable = {k: sorted(v) for k, v in self._paused_threads.items()}
+        self._atomic_write_json(p, serializable)
 
     # ── Pending claims (T-065) ──────────────────────────────────────────────
 
@@ -1185,9 +1225,13 @@ class BridgeAdapter(BasePlatformAdapter):
                 if addr not in m.setdefault("addresses", []):
                     m["addresses"].append(addr)
                 self._save_unified_threads()
+                self._paused_threads.get(person, set()).discard(name)
+                self._save_paused_threads()
                 return f"Joined unified thread '{name}'. Reply to unified~{name}."
         thread["members"][key] = self._unified_member_record(bridge, data)
         self._save_unified_threads()
+        self._paused_threads.get(person, set()).discard(name)
+        self._save_paused_threads()
         return f"Joined unified thread '{name}'. Reply to unified~{name}."
 
     def _cmd_unified_leave(self, bridge: str, data: dict, name: str) -> str:
@@ -1203,19 +1247,39 @@ class BridgeAdapter(BasePlatformAdapter):
         return f"Left unified thread '{name}'."
 
     def _cmd_unified_exit(self, bridge: str, data: dict, name: str = "") -> str:
-        """Leave the unified session and return to normal chat (T-067).
+        """Leave the unified session and return to normal chat (T-067/T-068).
 
-        Clears the user's active thread so their messages no longer route
-        into a unified thread — they go back to the normal per-bridge chat.
-        Does NOT remove them as a member (that's `leave`); it only stops the
-        active-thread mapping.
+        Pauses the sender's routing out of the given thread (or all their
+        threads if no name given): their messages from a member chat go back
+        to the normal per-bridge chat (own agent session), even though they
+        stay a member. Does NOT remove membership (that's `leave`). Re-enter
+        with /unified switch <name> or /unified join <name>.
         """
         person = self._resolve_identity(bridge, data.get("sender", ""))
-        if person not in self._active_threads:
-            return "You are not in a unified session. Use /unified switch <name> to enter one."
-        del self._active_threads[person]
-        self._save_active_threads()
+        paused = self._paused_threads.setdefault(person, set())
+        if name:
+            if name not in self._unified_threads:
+                return f"Unified thread '{name}' not found."
+            paused.add(name)
+        else:
+            # Exit all threads this person is a member of.
+            for tname, thread in self._unified_threads.items():
+                if self._person_in_thread(thread, person):
+                    paused.add(tname)
+        self._save_paused_threads()
+        if name:
+            return f"Exited unified thread '{name}'. Messages from its chats now go to the normal chat."
         return "Exited the unified session. Your messages now go to the normal chat."
+
+    def _person_in_thread(self, thread: dict, person: str) -> bool:
+        """Return True if ``person`` is a member of ``thread`` (by key or address)."""
+        for key, m in thread.get("members", {}).items():
+            if m.get("person") == person or m.get("user_id") == person:
+                return True
+            for addr in m.get("addresses", []):
+                if addr.get("user_id") == person:
+                    return True
+        return False
 
     def _cmd_unified_mode(self, bridge: str, data: dict, name: str, mode: str) -> str:
         """Set the mode of a unified thread (T-059 implements the logic)."""
@@ -1258,7 +1322,10 @@ class BridgeAdapter(BasePlatformAdapter):
                 f"Join it first with /unified join {name}."
             )
         self._active_threads[person] = name
+        # T-068: switching back into a thread unpauses it.
+        self._paused_threads.get(person, set()).discard(name)
         self._save_active_threads()
+        self._save_paused_threads()
         return f"Switched to unified thread '{name}'. Your messages now go there."
 
     async def _cmd_unified_send(
@@ -1671,6 +1738,15 @@ class BridgeAdapter(BasePlatformAdapter):
         # triggers the multicast branch in send(). All members map to the
         # same "unified~<name>", so the shared session is preserved.
         unified_name = self._find_unified_for_member(bridge, chat_id)
+        # T-068: if the user exited (paused) this thread, do NOT route the
+        # message into the unified thread — they stay a member but write a
+        # normal DM with the agent (own session, not the shared one). The
+        # membership lookup above would still match, so we skip it here.
+        if unified_name:
+            person_for_pause = self._resolve_identity(bridge, sender)
+            if person_for_pause in self._paused_threads and \
+               unified_name in self._paused_threads[person_for_pause]:
+                unified_name = None
         if not unified_name:
             # T-064: if the user has an active thread, map onto it. This
             # covers the case where the user is a member via a different
