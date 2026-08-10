@@ -780,6 +780,72 @@ class BridgeAdapter(BasePlatformAdapter):
         self._save_unified_threads()
         return f"Mode of '{name}' set to '{mode}'."
 
+    # ── Adaptive state machine (T-061) ──────────────────────────────────
+
+    # Per-thread state machine: idle → active → digesting. Under high
+    # message frequency (3 messages in 30s, or 5 in 60s) the thread
+    # transitions to ``digesting`` and buffers messages instead of
+    # dispatching them one-by-one. After ``digest_interval`` (60s) the
+    # buffer is flushed as a single bundled turn. State + buffer persist
+    # in ``unified_threads.json`` so a gateway restart doesn't lose the
+    # in-flight digest window.
+
+    ADAPTIVE_WINDOW_30 = 30  # seconds
+    ADAPTIVE_WINDOW_60 = 60  # seconds
+    ADAPTIVE_THRESHOLD_30 = 3  # messages in 30s → digest
+    ADAPTIVE_THRESHOLD_60 = 5  # messages in 60s → digest
+    ADAPTIVE_DIGEST_INTERVAL = 60  # seconds — flush after this
+    ADAPTIVE_COOLDOWN = 10  # seconds post-flush cooldown
+
+    def _adaptive_state(self, name: str) -> dict:
+        """Return the adaptive state dict for a thread, initialising it.
+
+        The state lives under the thread's ``_adaptive`` key so it
+        persists with the rest of the thread in ``unified_threads.json``.
+        """
+        thread = self._unified_threads.get(name)
+        if thread is None:
+            # Defensive: callers guard with a real thread, but don't crash
+            # if a message arrives for a since-deleted thread.
+            thread = {}
+            self._unified_threads[name] = thread
+        st = thread.setdefault("_adaptive", {
+            "state": "idle",
+            "buffer": [],
+            "last_msg_ts": 0.0,
+            "digest_until": 0.0,
+            "cooldown_until": 0.0,
+        })
+        return st
+
+    def _adaptive_note_message(self, name: str, sender: str, text: str) -> str:
+        """Record a message for the adaptive state machine.
+
+        Returns ``"dispatch"`` if the message should be dispatched
+        normally (thread is in ``active`` state, frequency is low) or
+        ``"buffer"`` if the thread has flipped to ``digesting`` and the
+        message was appended to the buffer instead.
+        """
+        st = self._adaptive_state(name)
+        now = time.time()
+        st["last_msg_ts"] = now
+        # Sliding window: count messages in the last 30s / 60s.
+        recent_30 = [m for m in st["buffer"] if now - m["ts"] < self.ADAPTIVE_WINDOW_30]
+        recent_60 = [m for m in st["buffer"] if now - m["ts"] < self.ADAPTIVE_WINDOW_60]
+        if (
+            len(recent_30) >= self.ADAPTIVE_THRESHOLD_30
+            or len(recent_60) >= self.ADAPTIVE_THRESHOLD_60
+        ):
+            st["state"] = "digesting"
+            st["buffer"].append({"ts": now, "sender": sender, "text": text})
+            st["digest_until"] = now + self.ADAPTIVE_DIGEST_INTERVAL
+            self._save_unified_threads()
+            return "buffer"
+        st["state"] = "active"
+        st["buffer"].append({"ts": now, "sender": sender, "text": text})
+        self._save_unified_threads()
+        return "dispatch"
+
     # ── protokoll lifecycle (T-059) ──────────────────────────────────
 
     def _protokoll_dir(self, thread_name: str) -> Path:

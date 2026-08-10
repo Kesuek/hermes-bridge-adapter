@@ -840,3 +840,15 @@ def test_reply_to_resolves_across_bridges(tmp_path):
     assert files
     data = json.loads(files[0].read_text("utf-8"))
     assert data["reply_to"] == "msg_abc"
+
+
+# ── T-061: Adaptive Zustandsmaschine ───────────────────────────────────
+
+
+def test_adaptive_state_transitions(tmp_path):
+    a = _make_adapter(tmp_path)
+    a._load_unified_threads()
+    a._cmd_unified_create("imsg", {"sender": "ronny", "chat": {"id": "u1"}}, "projekt")
+    # idle → active on first message
+    a._adaptive_note_message("projekt", "ronny", "hi")
+    assert a._unified_threads["projekt"].get("_adaptive", {}).get("state") == "active"
