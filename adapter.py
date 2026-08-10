@@ -590,13 +590,24 @@ class BridgeAdapter(BasePlatformAdapter):
         """Return the unified thread name ``{bridge}:{chat_id}`` belongs to.
 
         A member is identified by the key ``{bridge}:{chat_id}`` in a
-        thread's ``members`` dict. Returns the first matching thread name
-        (or ``None`` if not a member of any thread).
+        thread's ``members`` dict, OR — after T-062 dedup — by an entry in
+        a member's ``addresses`` array (the same person joining from a
+        second bridge is merged into the existing member rather than
+        added as a new one). Returns the first matching thread name (or
+        ``None`` if not a member of any thread).
         """
         key = f"{bridge}:{chat_id}"
         for name, thread in self._unified_threads.items():
-            if key in thread.get("members", {}):
+            members = thread.get("members", {})
+            if key in members:
                 return name
+            # T-062: a merged member keeps its primary key, but additional
+            # bridge addresses live in its ``addresses`` array. A message
+            # from any of them must still map to this thread.
+            for m in members.values():
+                for addr in m.get("addresses", []):
+                    if addr.get("bridge") == bridge and addr.get("chat_id") == chat_id:
+                        return name
         return None
 
     @staticmethod
@@ -606,14 +617,24 @@ class BridgeAdapter(BasePlatformAdapter):
         return f"{bridge}:{chat_id}"
 
     def _unified_member_record(self, bridge: str, data: dict) -> dict:
-        """Build a member record (for storage in ``members``)."""
+        """Build a member record (for storage in ``members``).
+
+        Includes a ``person`` field — the canonical identity from the
+        identity map (T-062) — and an ``addresses`` array (initially
+        containing just this bridge's address) so a second join from
+        another bridge can merge into the same member instead of
+        creating a duplicate.
+        """
         chat_id = (data.get("chat", {}) or {}).get("id", "") or data.get("sender", "")
+        user_id = data.get("sender", "")
         return {
             "bridge": bridge,
             "chat_id": chat_id,
-            "user_id": data.get("sender", ""),
-            "user_name": data.get("sender_name") or data.get("sender", ""),
+            "user_id": user_id,
+            "user_name": data.get("sender_name") or user_id,
+            "person": self._resolve_identity(user_id),
             "joined_at": _now_iso(),
+            "addresses": [{"bridge": bridge, "chat_id": chat_id, "user_id": user_id}],
         }
 
     async def _send_reply(self, bridge: str, data: dict, message: str) -> None:
@@ -790,13 +811,36 @@ class BridgeAdapter(BasePlatformAdapter):
         return "\n".join(lines)
 
     def _cmd_unified_join(self, bridge: str, data: dict, name: str) -> str:
-        """Add the sender as a member of a unified thread."""
+        """Add the sender as a member of a unified thread.
+
+        T-062: if the sender's canonical identity (per the identity map)
+        is already a member, merge the new ``{bridge}:{chat_id}`` address
+        into the existing member's ``addresses`` array instead of creating
+        a duplicate entry. The primary member key stays the first address
+        the person joined from; ``_find_unified_for_member`` also scans
+        ``addresses`` so inbound messages from any merged bridge still
+        route to the thread.
+        """
         thread = self._unified_threads.get(name)
         if not thread:
             return f"Unified thread '{name}' not found."
         key = self._unified_member_key(bridge, data)
-        if key in thread["members"]:
+        members = thread["members"]
+        if key in members:
             return f"You are already a member of '{name}'."
+        # T-062 dedup: same person from a second bridge → merge.
+        person = self._resolve_identity(data.get("sender", ""))
+        for m in members.values():
+            if m.get("person") == person:
+                addr = {
+                    "bridge": bridge,
+                    "chat_id": data.get("chat", {}).get("id", "") or data.get("sender", ""),
+                    "user_id": data.get("sender", ""),
+                }
+                if addr not in m.setdefault("addresses", []):
+                    m["addresses"].append(addr)
+                self._save_unified_threads()
+                return f"Joined unified thread '{name}'. Reply to unified~{name}."
         thread["members"][key] = self._unified_member_record(bridge, data)
         self._save_unified_threads()
         return f"Joined unified thread '{name}'. Reply to unified~{name}."
@@ -1396,14 +1440,25 @@ class BridgeAdapter(BasePlatformAdapter):
             results = []
             resolved_reply_to = self._resolve_reply_to(reply_to)
             for member in members.values():
-                mb = member.get("bridge")
-                mc = member.get("chat_id")
-                if not mb or not mc:
-                    continue
-                r = await self._write_outbox(
-                    mb, f"{mb}~{mc}", text=text, reply_to=resolved_reply_to,
-                )
-                results.append(r)
+                # T-062: a member may have multiple bridge addresses (the
+                # same person joined from several bridges). Multicast to
+                # the primary address AND every merged address, deduping
+                # so a duplicate address (shouldn't happen, but defensive)
+                # isn't sent twice.
+                addrs = [(member.get("bridge"), member.get("chat_id"))]
+                for a in member.get("addresses", []):
+                    addrs.append((a.get("bridge"), a.get("chat_id")))
+                seen: set[tuple] = set()
+                for mb, mc in addrs:
+                    if not mb or not mc:
+                        continue
+                    if (mb, mc) in seen:
+                        continue
+                    seen.add((mb, mc))
+                    r = await self._write_outbox(
+                        mb, f"{mb}~{mc}", text=text, reply_to=resolved_reply_to,
+                    )
+                    results.append(r)
             ok = bool(results) and all(r.success for r in results)
             return SendResult(
                 success=ok,

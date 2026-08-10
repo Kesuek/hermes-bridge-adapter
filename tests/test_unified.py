@@ -909,3 +909,21 @@ def test_identity_map_resolves_alias(tmp_path):
     assert a._resolve_identity("ronny.pietschke@icloud.com") == "ronny"
     assert a._resolve_identity("ronny") == "ronny"
     assert a._resolve_identity("anja") == "anja"  # unknown → itself
+
+
+def test_join_dedup_same_person_two_bridges(tmp_path):
+    a = _make_adapter(tmp_path)
+    a._load_unified_threads()
+    a._identity_map = {"ronny": ["ronny.pietschke@icloud.com", "ronny"]}
+    a._cmd_unified_create(
+        "imsg",
+        {"sender": "ronny.pietschke@icloud.com", "chat": {"id": "u1"}},
+        "projekt",
+    )
+    # same person joins from talk
+    a._cmd_unified_join("talk", {"sender": "ronny", "chat": {"id": "t1"}}, "projekt")
+    members = a._unified_threads["projekt"]["members"]
+    # both bridges under ONE member (canonical identity)
+    assert len(members) == 1
+    # but both bridge:chat_id addresses are present
+    assert "imsg:u1" in members or "talk:t1" in members
