@@ -530,3 +530,20 @@ def test_unified_silent_drops_even_when_mentioned(tmp_path):
     asyncio.run(run())
     a.handle_message.assert_not_awaited()
     assert not inbox_file.exists()
+
+
+# ── T-059 Task 4: participant mode NO_REPLY teaching ─────────────────
+
+
+def test_platform_hint_teaches_participant_no_reply():
+    hints = {}
+
+    class _Ctx:
+        def register_platform(self, *, name, **kwargs):
+            hints["hint"] = kwargs.get("platform_hint", "")
+
+    from adapter import register
+
+    register(_Ctx())
+    assert "NO_REPLY" in hints["hint"]
+    assert "participant" in hints["hint"]

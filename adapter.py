@@ -1478,6 +1478,11 @@ def register(ctx):
             "files (e.g. registry/imsg.yaml has target_format). To send a "
             "message, address the target as <bridge>~<target>, e.g. "
             "imsg~user@example.com for iMessage. Match the target to "
-            "the bridge's target_format (email / phone / chat_id)."
+            "the bridge's target_format (email / phone / chat_id). "
+            "In unified threads you are a participant, not a bot. Reply only "
+            "when you have something to contribute (a question directed at you, "
+            "relevant info, a correction, concrete value). When you have "
+            "nothing to contribute, reply with NO_REPLY — it is suppressed and "
+            "you stay silent."
         ),
     )
