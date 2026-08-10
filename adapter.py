@@ -1156,16 +1156,46 @@ class BridgeAdapter(BasePlatformAdapter):
         # participant mode — the agent decides whether to reply. The other
         # modes (reactive/silent/protokoll) are deterministic and handled
         # above, so they're unaffected by adaptive bundling.
+        #
+        # When ``digest_until`` has elapsed, the buffer is flushed as one
+        # bundled turn (a single MessageEvent whose text is a ``[System: N
+        # messages from M users]`` header followed by the buffered lines).
+        # The current message joins the bundle so the flush isn't a
+        # separate turn.
         if unified_name:
             mode = self._unified_threads[unified_name].get("mode", "participant")
             if mode == "participant":
-                action = self._adaptive_note_message(unified_name, sender, text)
-                if action == "buffer":
-                    try:
-                        filepath.unlink()
-                    except OSError:
-                        pass
-                    return
+                st = self._adaptive_state(unified_name)
+                now = time.time()
+                if st["state"] == "digesting" and now >= st["digest_until"]:
+                    # Flush: append the current message, then dispatch the
+                    # whole buffer as one bundled turn.
+                    buf = st["buffer"]
+                    buf.append({"ts": now, "sender": sender, "text": text})
+                    users = {m["sender"] for m in buf}
+                    lines = "\n".join(
+                        f"[{time.strftime('%H:%M', time.localtime(m['ts']))}] "
+                        f"[{m['sender']}] {m['text']}" for m in buf
+                    )
+                    bundle_text = (
+                        f"[System: {len(buf)} messages from "
+                        f"{len(users)} users]\n{lines}"
+                    )
+                    st["buffer"] = []
+                    st["state"] = "active"
+                    st["cooldown_until"] = now + self.ADAPTIVE_COOLDOWN
+                    self._save_unified_threads()
+                    # Swap the message text for the bundle and let the
+                    # normal dispatch path build the event + routing ctx.
+                    text = bundle_text
+                else:
+                    action = self._adaptive_note_message(unified_name, sender, text)
+                    if action == "buffer":
+                        try:
+                            filepath.unlink()
+                        except OSError:
+                            pass
+                        return
 
         effective_text = f"{text}\n\n[{routing_ctx}]" if text else f"[{routing_ctx}]"
 

@@ -6,6 +6,7 @@ Runs against the ``adapter`` module directly, mirroring ``test_registry.py``.
 import asyncio
 import json
 import sys
+import time
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -873,3 +874,25 @@ def test_adaptive_buffers_in_digest_mode(tmp_path):
         }, tmp_path / "x.json")
     asyncio.run(run())
     a.handle_message.assert_not_awaited()
+
+
+def test_adaptive_flush_dispatches_bundle(tmp_path):
+    from unittest.mock import AsyncMock
+    a = _make_adapter(tmp_path)
+    a._extra["allow_all"] = "true"
+    a._load_unified_threads()
+    a._cmd_unified_create("imsg", {"sender": "ronny", "chat": {"id": "u1"}}, "projekt")
+    a.handle_message = AsyncMock()
+    for i in range(5):
+        a._adaptive_note_message("projekt", "ronny", f"msg {i}")
+    # set digest_until into the past → flush is due
+    a._unified_threads["projekt"]["_adaptive"]["digest_until"] = time.time() - 1
+    async def run():
+        await a._process_incoming("imsg", {
+            "sender": "ronny", "text": "msg 5",
+            "chat": {"id": "u1", "type": "direct"},
+        }, tmp_path / "x.json")
+    asyncio.run(run())
+    a.handle_message.assert_awaited_once()
+    event = a.handle_message.await_args[0][0]
+    assert "[System:" in event.text  # bundle header
