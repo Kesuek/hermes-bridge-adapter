@@ -791,6 +791,7 @@ class BridgeAdapter(BasePlatformAdapter):
             "members": self._cmd_unified_members,
             "mode": self._cmd_unified_mode,
             "switch": self._cmd_unified_switch,
+            "send": self._cmd_unified_send,
             "protokoll": None,
         }
         handler = dispatch.get(sub)
@@ -878,6 +879,18 @@ class BridgeAdapter(BasePlatformAdapter):
                 await self._send_reply(
                     bridge, data, self._cmd_unified_switch(bridge, data, name)
                 )
+        elif sub == "send":
+            name = args[0] if args else ""
+            message = " ".join(args[1:]) if len(args) > 1 else ""
+            if not name or not message:
+                await self._send_reply(
+                    bridge, data, "Usage: /unified send <name> <message>"
+                )
+            else:
+                await self._send_reply(
+                    bridge, data,
+                    await self._cmd_unified_send(bridge, data, name, message),
+                )
 
         # Remove the processed inbox file.
         try:
@@ -896,6 +909,7 @@ class BridgeAdapter(BasePlatformAdapter):
             "  /unified members <name>     — list members of a thread\n"
             "  /unified mode <name> <mode> — set mode (participant | reactive | off | silent | protokoll)\n"
             "  /unified switch <name>     — set this thread as your active one (your messages route here)\n"
+            "  /unified send <name> <msg> — one-shot send to a thread (multicast, no switch)\n"
             "  /unified protokoll open <name> [sitzung] — open a protokoll session (leader-only)\n"
             "  /unified protokoll close <name>         — close + write the protokoll artifact (leader-only)\n"
             "  /unified help                — this help\n\n"
@@ -1034,6 +1048,27 @@ class BridgeAdapter(BasePlatformAdapter):
         self._active_threads[person] = name
         self._save_active_threads()
         return f"Switched to unified thread '{name}'. Your messages now go there."
+
+    async def _cmd_unified_send(
+        self, bridge: str, data: dict, name: str, message: str
+    ) -> str:
+        """Send a one-shot message to a unified thread (multicast), without
+        switching the active thread (T-064).
+
+        Uses the existing ``send("unified~<name>", ...)`` multicast path —
+        every member's routable address gets one outbox file. No membership
+        check on the sender: the framework's auth already gates who may
+        address the bridge, and ``send`` itself rejects unknown threads.
+        """
+        thread = self._unified_threads.get(name)
+        if not thread:
+            return f"Unified thread '{name}' not found."
+        if not message:
+            return "Usage: /unified send <name> <message>"
+        result = await self.send(f"unified~{name}", message)
+        if result.success:
+            return f"Sent to unified thread '{name}'."
+        return f"Send failed: {result.error}"
 
     # ── Adaptive state machine (T-061) ──────────────────────────────────
 

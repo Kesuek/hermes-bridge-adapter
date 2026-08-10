@@ -1172,3 +1172,17 @@ def test_inbound_maps_to_active_thread(tmp_path):
     event = a.handle_message.await_args[0][0]
     assert event.source.chat_id == "unified~projekt"
     assert event.source.thread_id == "projekt"
+
+
+def test_unified_send_to_thread(tmp_path):
+    """T-064 Task 4: /unified send <name> <message> multicasts to every
+    member's outbox without switching the active thread."""
+    a = _make_adapter(tmp_path)
+    a._load_unified_threads()
+    a._cmd_unified_create("imsg", {"sender": "ronny", "chat": {"id": "u1"}}, "projekt")
+    a._cmd_unified_join("talk", {"sender": "anja", "chat": {"id": "t1"}}, "projekt")
+    result = asyncio.run(a._cmd_unified_send("imsg", {"sender": "ronny"}, "projekt", "Hallo alle"))
+    assert "sent" in result.lower() or "delivered" in result.lower()
+    # beide Member-Outboxen haben die Nachricht
+    assert (a._bridge_dir / "outbox" / "imsg").exists()
+    assert (a._bridge_dir / "outbox" / "talk").exists()
