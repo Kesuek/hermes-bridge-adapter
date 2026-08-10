@@ -1242,3 +1242,41 @@ def test_identity_confirm_merges(tmp_path):
     assert a._resolve_identity("imsg", "ronny.pietschke@icloud.com") == a._resolve_identity("talk", "ronny")
     # pending claim ist weg
     assert not a._pending_claims
+
+
+def test_set_username(tmp_path):
+    """T-065 Task 4: /unified set username <name> sets the display name."""
+    a = _make_adapter(tmp_path)
+    a._load_unified_threads()
+    a._load_identity_map()
+    a._cmd_unified_set_username("imsg", {"sender": "ronny.pietschke@icloud.com"}, "Ronny P.")
+    person = a._resolve_identity("imsg", "ronny.pietschke@icloud.com")
+    assert a._usernames.get(person) == "Ronny P."
+
+
+def test_username_persist_roundtrip(tmp_path):
+    """T-065 Task 4: usernames survive save→load roundtrip."""
+    a = _make_adapter(tmp_path)
+    a._usernames = {"ronny": "Ronny P."}
+    a._save_usernames()
+    a._usernames = {}
+    a._load_usernames()
+    assert a._usernames["ronny"] == "Ronny P."
+
+
+def test_status_lists_merged_addresses_and_username(tmp_path):
+    """T-065 Task 4: /unified status shows merged addresses + username."""
+    a = _make_adapter(tmp_path)
+    a._bridges = ["imsg", "talk"]
+    a._load_unified_threads()
+    a._load_identity_map()
+    a._load_usernames()
+    asyncio.run(a._cmd_unified_identity_claim("imsg", {"sender": "ronny.pietschke@icloud.com"}, "talk~ronny"))
+    claim_id = next(iter(a._pending_claims))
+    code = a._pending_claims[claim_id]["code"]
+    a._cmd_unified_identity_confirm("talk", {"sender": "ronny"}, code)
+    a._cmd_unified_set_username("imsg", {"sender": "ronny.pietschke@icloud.com"}, "Ronny P.")
+    status = a._cmd_unified_status("imsg", {"sender": "ronny.pietschke@icloud.com"})
+    assert "Ronny P." in status
+    assert "ronny.pietschke@icloud.com" in status
+    assert "ronny" in status

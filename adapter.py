@@ -318,6 +318,11 @@ class BridgeAdapter(BasePlatformAdapter):
         # confirm <code>`` from the target merges the two identities.
         self._pending_claims: dict[str, dict] = {}
 
+        # Display names per canonical person (T-065): {person → display_name}.
+        # Set by ``/unified set username <name>``; the status command shows it
+        # alongside the person's addresses.
+        self._usernames: dict[str, str] = {}
+
     # ── Lifecycle ────────────────────────────────────────────────────
 
     async def connect(self, **kwargs) -> bool:
@@ -360,6 +365,10 @@ class BridgeAdapter(BasePlatformAdapter):
         # Load pending identity claims (T-065) so an in-flight challenge-
         # response survives an adapter restart.
         self._load_pending_claims()
+
+        # Load usernames (T-065) so /unified set username persists across
+        # restarts.
+        self._load_usernames()
 
         # Whether or not any bridges are registered yet, the adapter boots
         # and the registry loop keeps watching for manifests to appear at
@@ -751,6 +760,36 @@ class BridgeAdapter(BasePlatformAdapter):
             return
         self._atomic_write_json(p, self._pending_claims)
 
+    # ── Usernames (T-065) ──────────────────────────────────────────────────
+
+    def _usernames_path(self) -> Path:
+        """Path to the ``usernames.json`` persistence file."""
+        return self._bridge_dir / "usernames.json" if self._bridge_dir else Path()
+
+    def _load_usernames(self) -> None:
+        """Load display names from ``usernames.json`` (best-effort).
+
+        Missing or unreadable files reset ``_usernames`` to an empty dict
+        so the adapter keeps running instead of crashing on a bad file.
+        """
+        self._usernames = {}
+        p = self._usernames_path()
+        if not p or not p.exists():
+            return
+        try:
+            data = json.loads(p.read_text("utf-8"))
+            if isinstance(data, dict):
+                self._usernames = data
+        except (json.JSONDecodeError, OSError) as e:
+            logger.warning("Bad usernames.json: %s", e)
+
+    def _save_usernames(self) -> None:
+        """Persist display names to ``usernames.json`` (atomic write)."""
+        p = self._usernames_path()
+        if not p:
+            return
+        self._atomic_write_json(p, self._usernames)
+
     @staticmethod
     def _unified_member_key(bridge: str, data: dict) -> str:
         """Build the member key ``{bridge}:{chat_id}`` for a ``/unified`` cmd."""
@@ -847,6 +886,7 @@ class BridgeAdapter(BasePlatformAdapter):
             "switch": self._cmd_unified_switch,
             "send": self._cmd_unified_send,
             "identity": None,
+            "set": None,
             "protokoll": None,
         }
         handler = dispatch.get(sub)
@@ -883,6 +923,25 @@ class BridgeAdapter(BasePlatformAdapter):
                 await self._send_reply(
                     bridge, data,
                     "Usage: /unified identity <claim|confirm> ...",
+                )
+        elif sub == "set":
+            # /unified set username <name>
+            field = args[0] if args else ""
+            if field == "username":
+                name = " ".join(args[1:]) if len(args) > 1 else ""
+                if not name:
+                    await self._send_reply(
+                        bridge, data, "Usage: /unified set username <name>"
+                    )
+                else:
+                    await self._send_reply(
+                        bridge, data,
+                        self._cmd_unified_set_username(bridge, data, name),
+                    )
+            else:
+                await self._send_reply(
+                    bridge, data,
+                    "Usage: /unified set username <name>",
                 )
         elif sub == "protokoll":
             # /unified protokoll open <thread> [sitzung]
@@ -1023,13 +1082,34 @@ class BridgeAdapter(BasePlatformAdapter):
         return f"Created unified thread '{name}'. You are the first member. Reply to unified~{name}."
 
     def _cmd_unified_status(self, bridge: str, data: dict) -> str:
-        """List all unified threads and their members/mode."""
-        if not self._unified_threads:
+        """List all unified threads, the merged identities, and usernames (T-065).
+
+        The thread listing is unchanged; the trailing "Identities" section
+        groups each canonical person's addresses (from the identity map) and
+        shows the display name set via ``/unified set username``.
+        """
+        if not self._unified_threads and not self._identity_map:
             return "No unified threads yet. Create one with /unified create <name>."
         lines = ["Unified threads:"]
         for name, thread in self._unified_threads.items():
             n = len(thread.get("members", {}))
             lines.append(f"  • {name} — {n} member(s), mode={thread.get('mode', 'participant')}")
+        # Identities section (T-065): show merged addresses per person + username.
+        if self._identity_map:
+            lines.append("")
+            lines.append("Identities:")
+            for person, entry in self._identity_map.items():
+                if isinstance(entry, dict):
+                    addrs = list(entry.get("aliases", []))
+                    wrappers = entry.get("wrappers", {})
+                    for w, alias in wrappers.items():
+                        label = f"{w}:{alias}"
+                        if label not in addrs:
+                            addrs.append(label)
+                else:
+                    addrs = list(entry)
+                display = self._usernames.get(person, person)
+                lines.append(f"  • {display} ({person}) — {', '.join(addrs) or '(no aliases)'}")
         return "\n".join(lines)
 
     def _cmd_unified_members(self, bridge: str, data: dict, name: str) -> str:
@@ -1244,6 +1324,19 @@ class BridgeAdapter(BasePlatformAdapter):
             self._save_pending_claims()
             return f"Confirmed. {source_id} and {target_id} are now the same person."
         return "Invalid or unknown code."
+
+    def _cmd_unified_set_username(self, bridge: str, data: dict, name: str) -> str:
+        """Set the display name of the sender's canonical person (T-065).
+
+        Stored per canonical person (identity map) so the same person on two
+        bridges sets it once. Persisted to ``usernames.json``.
+        """
+        if not name:
+            return "Usage: /unified set username <name>"
+        person = self._resolve_identity(bridge, data.get("sender", ""))
+        self._usernames[person] = name
+        self._save_usernames()
+        return f"Username set to '{name}'."
 
     # ── Adaptive state machine (T-061) ──────────────────────────────────
 
