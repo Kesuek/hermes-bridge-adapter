@@ -1136,6 +1136,32 @@ def test_unified_alias_u_shortcut(tmp_path):
     assert "aliasthread" in a._unified_threads
 
 
+def test_unified_alias_u_question_help(tmp_path):
+    from unittest.mock import AsyncMock
+    a = _make_adapter(tmp_path)
+    a._extra["allow_all"] = "true"
+    a._load_unified_threads()
+    a.handle_message = AsyncMock()
+    a._send_reply = AsyncMock()
+    inbox_file = tmp_path / "bridge" / "inbox" / "imsg" / "aliasq.json"
+    inbox_file.parent.mkdir(parents=True, exist_ok=True)
+    inbox_file.write_text("{}", encoding="utf-8")
+
+    async def run():
+        await a._process_incoming(
+            "imsg",
+            {"sender": "ronny", "text": "/u ?",
+             "chat": {"id": "u1", "type": "direct"}},
+            inbox_file,
+        )
+    asyncio.run(run())
+    # /u ? → /unified help → help text sent, not dispatched to agent.
+    a.handle_message.assert_not_awaited()
+    a._send_reply.assert_awaited_once()
+    help_text = a._send_reply.await_args[0][2]
+    assert "Unified Threads" in help_text
+
+
 def test_silent_flush_timer_dispatches_due_digest(tmp_path):
     """The silent-mode digest must flush on a timer, not only on the next
     inbound message. A single message followed by silence would otherwise

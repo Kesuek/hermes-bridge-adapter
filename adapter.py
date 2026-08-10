@@ -1633,7 +1633,7 @@ class BridgeAdapter(BasePlatformAdapter):
                 sub_aliases = {
                     "c": "create", "j": "join", "l": "leave", "x": "exit",
                     "m": "mode", "s": "switch", "st": "status",
-                    "me": "members", "d": "send", "h": "help",
+                    "me": "members", "d": "send", "h": "help", "?": "help",
                 }
                 mapped = sub_aliases.get(sub, sub)
                 rest = " ".join(parts2[1:]) if len(parts2) > 1 else ""
