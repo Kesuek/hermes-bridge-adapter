@@ -285,6 +285,9 @@ class BridgeAdapter(BasePlatformAdapter):
         self._seen_files: set[str] = set()
         self._reaction_handler: Optional[callable] = None
 
+        # Unified threads (T-058): {name → thread dict} loaded from disk.
+        self._unified_threads: dict[str, dict] = {}
+
     # ── Lifecycle ────────────────────────────────────────────────────
 
     async def connect(self, **kwargs) -> bool:
@@ -307,6 +310,10 @@ class BridgeAdapter(BasePlatformAdapter):
 
         # Registry-based discovery (replaces the old one-shot inbox scan).
         self._reconcile_registry_sync()
+
+        # Load persisted unified threads (T-058) so the inbound mapper and
+        # multicast sender see the same view across restarts.
+        self._load_unified_threads()
 
         # Whether or not any bridges are registered yet, the adapter boots
         # and the registry loop keeps watching for manifests to appear at
@@ -433,6 +440,44 @@ class BridgeAdapter(BasePlatformAdapter):
             d = self._bridge_dir / sub / name
             if d.exists():
                 shutil.rmtree(d, ignore_errors=True)
+
+    # ── Unified threads (T-058) ────────────────────────────────────────
+
+    UNIFIED_MODES = ("participant", "reactive", "silent", "protokoll")
+
+    def _unified_path(self) -> Path:
+        """Path to the unified_threads.json persistence file."""
+        return self._bridge_dir / "unified_threads.json" if self._bridge_dir else Path()
+
+    def _load_unified_threads(self) -> None:
+        """Load unified threads from ``unified_threads.json`` (best-effort).
+
+        Missing or unreadable files reset ``_unified_threads`` to an empty
+        dict so the adapter keeps running instead of crashing on a bad file.
+        """
+        self._unified_threads = {}
+        p = self._unified_path()
+        if not p or not p.exists():
+            return
+        try:
+            data = json.loads(p.read_text("utf-8"))
+            if isinstance(data, dict):
+                self._unified_threads = data
+        except (json.JSONDecodeError, OSError) as e:
+            logger.warning("Bad unified_threads.json: %s", e)
+
+    def _save_unified_threads(self) -> None:
+        """Persist unified threads to ``unified_threads.json``."""
+        p = self._unified_path()
+        if not p:
+            return
+        try:
+            p.write_text(
+                json.dumps(self._unified_threads, ensure_ascii=False, indent=2),
+                "utf-8",
+            )
+        except OSError as e:
+            logger.error("Failed to save unified_threads.json: %s", e)
 
     # ── Polling ─────────────────────────────────────────────────────
 
