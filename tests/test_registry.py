@@ -467,7 +467,7 @@ def test_group_chat_without_mention_deletes_file(tmp_path):
             "imsg",
             {
                 "sender": "someone@example.com",
-                "text": "no @hermes here",
+                "text": "just chatting among ourselves",
                 "chat": {"id": "grp", "type": "group"},
             },
             inbox_file,

@@ -54,8 +54,8 @@ REGISTRY_POLL_INTERVAL = 5.0  # seconds
 REGISTRY_DIR_NAME = "registry"
 MANIFEST_FIELDS = ["name", "service", "host", "target_format", "capabilities"]
 DEFAULT_MENTION_PATTERNS = [
-    r"(?<![\\w@])@?hermes\\s+agent\\b[,:\\-]?",
-    r"(?<![\\w@])@?hermes\\b[,:\\-]?",
+    r"(?<![\w@])@?hermes\s+agent\b[,:\-]?",
+    r"(?<![\w@])@?hermes\b[,:\-]?",
 ]
 
 
@@ -828,6 +828,23 @@ class BridgeAdapter(BasePlatformAdapter):
             routing_ctx = f"Message from {sender}, bridge {bridge}, reply to {routable_chat_id}"
             if data.get("reply_to"):
                 routing_ctx += f" (reply_to {data.get('reply_to')})"
+
+        # Unified thread modes (T-059): the thread's ``mode`` field controls
+        # the dispatch behavior of all member messages. ``participant`` (the
+        # default) falls through to the normal dispatch path below — the
+        # agent decides whether to reply. The other three modes are
+        # deterministic, enforced here BEFORE the gateway sees the message.
+        if unified_name:
+            mode = self._unified_threads[unified_name].get("mode", "participant")
+            if mode == "reactive" and not self._is_mentioned(text, bridge):
+                # Mention-gating like a group chat: drop the message and the
+                # inbox file so it isn't re-seen.
+                try:
+                    filepath.unlink()
+                except OSError:
+                    pass
+                return
+
         effective_text = f"{text}\n\n[{routing_ctx}]" if text else f"[{routing_ctx}]"
 
         # Determine message type

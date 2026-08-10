@@ -419,3 +419,56 @@ def test_unified_routing_no_leader_marker_for_non_leader(tmp_path):
     asyncio.run(run())
     event = a.handle_message.await_args[0][0]
     assert "Leader]" not in event.text
+
+
+# ── T-059 Task 2: reactive mode (mention gating) ──────────────────────
+
+
+def test_unified_reactive_drops_unmentioned(tmp_path):
+    a = _make_adapter(tmp_path)
+    a._extra["allow_all"] = "true"
+    a._load_unified_threads()
+    a._cmd_unified_create("imsg", {"sender": "ronny", "chat": {"id": "u1"}}, "projekt")
+    a._cmd_unified_mode("imsg", {"sender": "ronny"}, "projekt", "reactive")
+    a.handle_message = AsyncMock()
+    inbox_file = tmp_path / "bridge" / "inbox" / "imsg" / "m.json"
+    inbox_file.parent.mkdir(parents=True, exist_ok=True)
+    inbox_file.write_text("{}", encoding="utf-8")
+
+    async def run():
+        await a._process_incoming(
+            "imsg",
+            {
+                "sender": "ronny",
+                "text": "kein mention",
+                "chat": {"id": "u1", "type": "direct"},
+            },
+            inbox_file,
+        )
+
+    asyncio.run(run())
+    a.handle_message.assert_not_awaited()
+    assert not inbox_file.exists()  # dropped + file deleted
+
+
+def test_unified_reactive_passes_mentioned(tmp_path):
+    a = _make_adapter(tmp_path)
+    a._extra["allow_all"] = "true"
+    a._load_unified_threads()
+    a._cmd_unified_create("imsg", {"sender": "ronny", "chat": {"id": "u1"}}, "projekt")
+    a._cmd_unified_mode("imsg", {"sender": "ronny"}, "projekt", "reactive")
+    a.handle_message = AsyncMock()
+
+    async def run():
+        await a._process_incoming(
+            "imsg",
+            {
+                "sender": "ronny",
+                "text": "@hermes bitte antworten",
+                "chat": {"id": "u1", "type": "direct"},
+            },
+            tmp_path / "x.json",
+        )
+
+    asyncio.run(run())
+    a.handle_message.assert_awaited_once()
