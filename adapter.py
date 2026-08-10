@@ -844,6 +844,15 @@ class BridgeAdapter(BasePlatformAdapter):
                 except OSError:
                     pass
                 return
+            if mode == "silent":
+                # Listener: the agent never replies, but keeps context via
+                # session persistence (it sees the thread history on a later
+                # return). Drop the message and the inbox file — no agent turn.
+                try:
+                    filepath.unlink()
+                except OSError:
+                    pass
+                return
 
         effective_text = f"{text}\n\n[{routing_ctx}]" if text else f"[{routing_ctx}]"
 

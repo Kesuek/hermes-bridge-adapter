@@ -472,3 +472,61 @@ def test_unified_reactive_passes_mentioned(tmp_path):
 
     asyncio.run(run())
     a.handle_message.assert_awaited_once()
+
+
+# ── T-059 Task 3: silent mode (listener) ──────────────────────────────
+
+
+def test_unified_silent_drops_all(tmp_path):
+    a = _make_adapter(tmp_path)
+    a._extra["allow_all"] = "true"
+    a._load_unified_threads()
+    a._cmd_unified_create("imsg", {"sender": "ronny", "chat": {"id": "u1"}}, "projekt")
+    a._cmd_unified_mode("imsg", {"sender": "ronny"}, "projekt", "silent")
+    a.handle_message = AsyncMock()
+    inbox_file = tmp_path / "bridge" / "inbox" / "imsg" / "m.json"
+    inbox_file.parent.mkdir(parents=True, exist_ok=True)
+    inbox_file.write_text("{}", encoding="utf-8")
+
+    async def run():
+        await a._process_incoming(
+            "imsg",
+            {
+                "sender": "ronny",
+                "text": "egal was",
+                "chat": {"id": "u1", "type": "direct"},
+            },
+            inbox_file,
+        )
+
+    asyncio.run(run())
+    a.handle_message.assert_not_awaited()
+    assert not inbox_file.exists()
+
+
+def test_unified_silent_drops_even_when_mentioned(tmp_path):
+    """silent drops messages regardless of mentions — listener never replies."""
+    a = _make_adapter(tmp_path)
+    a._extra["allow_all"] = "true"
+    a._load_unified_threads()
+    a._cmd_unified_create("imsg", {"sender": "ronny", "chat": {"id": "u1"}}, "projekt")
+    a._cmd_unified_mode("imsg", {"sender": "ronny"}, "projekt", "silent")
+    a.handle_message = AsyncMock()
+    inbox_file = tmp_path / "bridge" / "inbox" / "imsg" / "m.json"
+    inbox_file.parent.mkdir(parents=True, exist_ok=True)
+    inbox_file.write_text("{}", encoding="utf-8")
+
+    async def run():
+        await a._process_incoming(
+            "imsg",
+            {
+                "sender": "ronny",
+                "text": "@hermes du musst antworten!",
+                "chat": {"id": "u1", "type": "direct"},
+            },
+            inbox_file,
+        )
+
+    asyncio.run(run())
+    a.handle_message.assert_not_awaited()
+    assert not inbox_file.exists()
