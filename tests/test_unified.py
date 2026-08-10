@@ -984,3 +984,26 @@ def test_join_dedup_same_person_two_bridges(tmp_path):
     assert len(members) == 1
     # but both bridge:chat_id addresses are present
     assert "imsg:u1" in members or "talk:t1" in members
+
+
+# ── T-063: Message-Relay ──────────────────────────────────────────────
+
+
+def test_identity_map_with_wrapper(tmp_path):
+    """T-063 Task 1: (wrapper, user_id) mapping prevents cross-bridge merges."""
+    a = _make_adapter(tmp_path)
+    a._identity_map = {
+        "ronny": {
+            "aliases": ["ronny.pietschke@icloud.com", "+491714824968", "ronny"],
+            "wrappers": {"imsg": "ronny.pietschke@icloud.com", "talk": "ronny"},
+        }
+    }
+    # (wrapper, user_id) match
+    assert a._resolve_identity("imsg", "ronny.pietschke@icloud.com") == "ronny"
+    assert a._resolve_identity("talk", "ronny") == "ronny"
+    # gleicher Alias auf anderem Wrapper → alias match (kein dedup mismatch)
+    assert a._resolve_identity("matrix", "ronny") == "ronny"
+    # unbekannt → selbst
+    assert a._resolve_identity("imsg", "anja") == "anja"
+    # legacy 1-arg form still works
+    assert a._resolve_identity("ronny") == "ronny"

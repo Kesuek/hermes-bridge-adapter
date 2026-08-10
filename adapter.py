@@ -576,8 +576,12 @@ class BridgeAdapter(BasePlatformAdapter):
     def _load_identity_map(self) -> None:
         """Load the identity map from ``identity_map.json`` (best-effort).
 
-        The map is ``{canonical_person: [alias, ...]}``. Missing or
-        unreadable files reset ``_identity_map`` to an empty dict.
+        Supports two shapes (T-063 widened the structure):
+
+        * legacy: ``{canonical_person: [alias, ...]}``
+        * current: ``{canonical_person: {"aliases": [...], "wrappers": {wrapper: alias}}}``
+
+        Missing or unreadable files reset ``_identity_map`` to an empty dict.
         """
         self._identity_map = {}
         p = self._identity_map_path()
@@ -590,17 +594,40 @@ class BridgeAdapter(BasePlatformAdapter):
         except (json.JSONDecodeError, OSError) as e:
             logger.warning("Bad identity_map.json: %s", e)
 
-    def _resolve_identity(self, user_id: str) -> str:
-        """Map a bridge-local user_id to a canonical person identity (T-062).
+    def _resolve_identity(self, wrapper_or_user_id: str, user_id: str | None = None) -> str:
+        """Map a ``(wrapper, user_id)`` pair to a canonical person (T-062/063).
 
-        Returns the canonical person if ``user_id`` is a known alias, or
-        ``user_id`` itself if unknown (so unrecognized identities pass
+        The identity map maps a person to their aliases AND which wrapper
+        each alias belongs to. A ``(wrapper, user_id)`` pair matches if the
+        wrapper's declared alias equals ``user_id``, OR the ``user_id`` is a
+        bare alias (no wrapper declared). This prevents merging two people
+        who happen to share an alias on different wrappers.
+
+        Backwards compatible: called with a single ``user_id`` argument it
+        falls back to a plain alias match (legacy callers + old map shape).
+        Returns ``user_id`` itself if unknown (unrecognized identities pass
         through unchanged).
         """
-        for person, aliases in self._identity_map.items():
-            if user_id in aliases:
-                return person
-        return user_id  # unknown → itself
+        # Backwards-compat: 1-arg form → plain alias match against any map shape.
+        if user_id is None:
+            w = None
+            uid = wrapper_or_user_id
+        else:
+            w = wrapper_or_user_id
+            uid = user_id
+        for person, entry in self._identity_map.items():
+            if isinstance(entry, dict):
+                wrappers = entry.get("wrappers", {})
+                aliases = entry.get("aliases", [])
+                if w is not None and wrappers.get(w) == uid:
+                    return person
+                if uid in aliases:
+                    return person
+            else:
+                # legacy: bare list of aliases
+                if uid in entry:
+                    return person
+        return uid  # unknown → itself
 
     def _find_unified_for_member(self, bridge: str, chat_id: str) -> Optional[str]:
         """Return the unified thread name ``{bridge}:{chat_id}`` belongs to.
