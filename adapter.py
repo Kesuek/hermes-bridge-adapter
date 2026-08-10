@@ -287,6 +287,7 @@ class BridgeAdapter(BasePlatformAdapter):
         self._cleanup_task: Optional[asyncio.Task] = None
         self._status_task: Optional[asyncio.Task] = None
         self._registry_task: Optional[asyncio.Task] = None
+        self._silent_flush_task: Optional[asyncio.Task] = None
         self._running = False
         self._seen_files: set[str] = set()
         self._reaction_handler: Optional[callable] = None
@@ -348,6 +349,7 @@ class BridgeAdapter(BasePlatformAdapter):
         self._poll_task = asyncio.create_task(self._poll_loop())
         self._cleanup_task = asyncio.create_task(self._cleanup_loop())
         self._status_task = asyncio.create_task(self._status_loop())
+        self._silent_flush_task = asyncio.create_task(self._silent_flush_loop())
         self._mark_connected()
 
         if not self._bridges:
@@ -372,6 +374,7 @@ class BridgeAdapter(BasePlatformAdapter):
             self._cleanup_task,
             self._status_task,
             self._registry_task,
+            self._silent_flush_task,
         ):
             if task:
                 task.cancel()
@@ -383,6 +386,7 @@ class BridgeAdapter(BasePlatformAdapter):
         self._cleanup_task = None
         self._status_task = None
         self._registry_task = None
+        self._silent_flush_task = None
         self._mark_disconnected()
         logger.info("Bridge adapter disconnected")
 
@@ -1729,6 +1733,88 @@ class BridgeAdapter(BasePlatformAdapter):
                         continue
             except OSError:
                 continue
+
+    # ── Silent digest flush (T-059) ──────────────────────────────────
+
+    async def _silent_flush_loop(self) -> None:
+        """Periodically flush silent-mode digest buffers.
+
+        The silent (mute) mode buffers every message and flushes it as one
+        bundled turn after ``digest_interval``. Without a timer, a single
+        message followed by silence would sit in the buffer forever — the
+        flush only fired on the NEXT inbound message. This loop checks every
+        ``digest_interval`` whether any silent-mode thread has a due digest
+        and flushes it. (Bug caught live 2026-08-10: silent-mode messages
+        never arrived because no timer existed.)
+        """
+        while self._running:
+            try:
+                await asyncio.sleep(self.ADAPTIVE_DIGEST_INTERVAL)
+                await self._flush_due_silent_digests()
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.warning("Silent digest flush error: %s", e)
+
+    async def _flush_due_silent_digests(self) -> None:
+        """Flush any silent-mode thread whose digest window has elapsed."""
+        now = time.time()
+        for name, thread in list(self._unified_threads.items()):
+            if thread.get("mode") != "silent":
+                continue
+            st = thread.get("_adaptive")
+            if not st or st.get("state") != "digesting":
+                continue
+            if now < st.get("digest_until", 0):
+                continue
+            buf = st.get("buffer", [])
+            if not buf:
+                st["state"] = "active"
+                self._save_unified_threads()
+                continue
+            users = {m["sender"] for m in buf}
+            lines = "\n".join(
+                f"[{time.strftime('%H:%M', time.localtime(m['ts']))}] "
+                f"[{m['sender']}] {m['text']}" for m in buf
+            )
+            bundle_text = (
+                f"[System: {len(buf)} messages from {len(users)} users]\n{lines}"
+                f"\n\n[Silent digest — read only, do not reply]"
+            )
+            st["buffer"] = []
+            st["state"] = "active"
+            st["cooldown_until"] = now + self.ADAPTIVE_COOLDOWN
+            self._save_unified_threads()
+            # Dispatch the digest to the shared session so the agent reads
+            # along. Build a MessageEvent from the thread's first member.
+            await self._dispatch_silent_digest(name, bundle_text)
+
+    async def _dispatch_silent_digest(self, name: str, bundle_text: str) -> None:
+        """Dispatch a silent digest as a MessageEvent on the shared session."""
+        thread = self._unified_threads.get(name)
+        if not thread:
+            return
+        members = thread.get("members", {})
+        if not members:
+            return
+        # Use the first member's identity for the session source.
+        first = next(iter(members.values()))
+        source = SessionSource(
+            platform=Platform("bridge-adapter"),
+            chat_id=f"unified~{name}",
+            chat_name=name,
+            chat_type="thread",
+            user_id=first.get("user_id", ""),
+            user_name=first.get("user_name", ""),
+            thread_id=name,
+        )
+        event = MessageEvent(
+            text=bundle_text,
+            message_type=MessageType.TEXT,
+            source=source,
+            raw_message={},
+        )
+        await self.handle_message(event)
 
     # ── Cleanup ─────────────────────────────────────────────────────
 

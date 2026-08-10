@@ -1075,3 +1075,44 @@ def test_relay_dedup_same_person_two_bridges(tmp_path):
     # ronny is on talk (1 address) → exactly 1 talk outbox file
     talk_files = list((a._bridge_dir / "outbox" / "talk").glob("*.json"))
     assert len(talk_files) == 1, "relay must dedup same address, not same person"
+
+
+def test_silent_flush_timer_dispatches_due_digest(tmp_path):
+    """The silent-mode digest must flush on a timer, not only on the next
+    inbound message. A single message followed by silence would otherwise
+    sit in the buffer forever. (Bug caught live 2026-08-10.)"""
+    a = _make_adapter(tmp_path)
+    a._extra["allow_all"] = "true"
+    a._load_unified_threads()
+    a._cmd_unified_create("imsg", {"sender": "ronny", "chat": {"id": "u1"}}, "projekt")
+    a._cmd_unified_mode("imsg", {"sender": "ronny"}, "projekt", "silent")
+    a.handle_message = AsyncMock()
+
+    # Buffer one message in silent mode (no dispatch, no flush yet).
+    inbox_file = tmp_path / "bridge" / "inbox" / "imsg" / "m.json"
+    inbox_file.parent.mkdir(parents=True, exist_ok=True)
+    inbox_file.write_text("{}", encoding="utf-8")
+
+    async def run():
+        await a._process_incoming(
+            "imsg",
+            {"sender": "ronny", "text": "wichtige info",
+             "chat": {"id": "u1", "type": "direct"}},
+            inbox_file,
+        )
+    asyncio.run(run())
+    a.handle_message.assert_not_awaited()
+    st = a._unified_threads["projekt"]["_adaptive"]
+    assert st["state"] == "digesting"
+    assert any(m["text"] == "wichtige info" for m in st["buffer"])
+
+    # Force the digest window to elapse, then run the flush loop.
+    st["digest_until"] = time.time() - 1
+    asyncio.run(a._flush_due_silent_digests())
+    a.handle_message.assert_awaited_once()
+    event = a.handle_message.await_args[0][0]
+    assert "[System:" in event.text
+    assert "wichtige info" in event.text
+    assert "do not reply" in event.text
+    # Buffer is cleared.
+    assert a._unified_threads["projekt"]["_adaptive"]["buffer"] == []
