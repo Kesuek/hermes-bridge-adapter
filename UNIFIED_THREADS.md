@@ -195,6 +195,16 @@ Pending claims and the identity map are both loaded on `connect()` and rewritten
 
 `/unified set username <name>` sets a display name for the sender's canonical person, persisted in `<bridge_dir>/usernames.json` (`{person → display_name}`, loaded on `connect()`). The `status` command shows it alongside each person's merged addresses.
 
+## Unified Handles (T-066)
+
+Unified threads decouple the on-thread identity from the raw bridge identity. Every participant — humans and the agent alike — is shown by a **unified handle** rather than a bridge-local `user_id`:
+
+- **User handle** — `_resolve_unified_handle(bridge, user_id)` returns `unified~<username>` when the person has a display name set (T-065), else falls back to the raw `unified~<user_id>`. This is the handle shown in the relay copies (`[Name] text` mirrored to the other member bridges) so all participants see a consistent name across messenger boundaries.
+- **Agent handle** — the agent's own handle comes from the config (`extra["agent_handle"]` / `BRIDGE_AGENT_HANDLE`), defaulting to `hermes`. It is static (no `/unified` command mutates it).
+- **Display prefix** — the relay strips the `unified~` prefix for display, so a message from `Kesuek` reads `[Kesuek] text` rather than `[unified~Kesuek] text`. In a unified thread everything is unified, so the prefix is noise on screen.
+
+Backwards compatible: without `agent_handle` in the config it stays `hermes`; without a username the user handle falls back to the raw identity. No existing thread breaks.
+
 ## Persistence
 
 Unified threads are persisted in `<bridge_dir>/unified_threads.json`:
