@@ -1,10 +1,10 @@
-# Unified Threads — eine Agent-Session über mehrere Bridges
+# Unified Threads — one agent session across multiple bridges
 
-> **Das Alleinstellungsmerkmal des Bridge Adapters.** Weil jede Bridge über denselben JSON-Datei-Vertrag an den Adapter angebunden ist, können mehrere Bridges eine **gemeinsame Agent-Session** teilen. Native Gateway-Adapter (Telegram, Discord, Matrix, …) sind voneinander isoliert — jede Plattform hat ihre eigene Session. Der Bridge Adapter macht daraus **eine Konversation über alle deine Messaging-Welten**.
+> **The Bridge Adapter's differentiator.** Because every bridge is wired to the adapter through the same JSON-file contract, multiple bridges can share a **single agent session** — one conversation across iMessage, Talk, and any other wrapper. Native gateway adapters are isolated from each other (each platform has its own session); the Bridge Adapter turns them into **one thread across all your messaging worlds**.
 
-## Konzept
+## Concept
 
-Ein **Unified Thread** mappt alle Member einer Gruppe auf denselben virtuellen Thread:
+A **Unified Thread** maps every member of a group onto the same virtual thread:
 
 ```
 chat_type = "thread"
@@ -12,129 +12,129 @@ chat_id   = "unified"
 thread_id = <name>
 ```
 
-Der Gateway baut daraus den Session-Key `agent:main:bridge_adapter:thread:unified:<name>` — **ohne user_id** (verifiziert gegen `gateway/session.py`: bei `thread` + `thread_sessions_per_user=False` wird kein user_id angehängt). Dadurch teilen sich alle Member **eine** Session, und der Agent prefixt jede Nachricht automatisch mit `[Name]`.
+The gateway builds the session key `agent:main:bridge_adapter:thread:unified:<name>` — **without user_id** (verified against `gateway/session.py`: for `thread` + `thread_sessions_per_user=False` no user_id is appended). All members therefore share **one** session, and the agent auto-prefixes each message with `[Name]`.
 
-**Kein Core-Eingriff** — die Session-Mechanik ist im Gateway bereits vorhanden, der Adapter mappt nur darauf.
+**No core change** — the session mechanism already exists in the gateway; the adapter just maps onto it.
 
-## `/unified`-Befehle
+## `/unified` commands
 
-Eine Nachricht, die mit `/unified` beginnt, wird vom Adapter als Befehl geparst (erreicht den Agenten nie). Befehle kommen aus jeder Member-Bridge wie eine normale Nachricht:
+A message starting with `/unified` is parsed by the adapter as a command (it never reaches the agent). Commands are sent from any member bridge's `inbox/` like a normal message:
 
-| Befehl | Beschreibung |
-|--------|--------------|
-| `/unified create <name>` | Thread anlegen; der Sender wird erster Member (und **Leader**) |
-| `/unified status` | Alle Threads + Memberzahl + Modus auflisten |
-| `/unified join <name>` | Bestehendem Thread beitreten |
-| `/unified leave <name>` | Thread verlassen |
-| `/unified members <name>` | Member eines Threads auflisten |
-| `/unified mode <name> <mode>` | Modus setzen — `participant` / `reactive` / `off` / `silent` / `protokoll` |
-| `/unified protokoll open <name> [sitzung]` | Protokoll-Sitzung öffnen (Leader-only) |
-| `/unified protokoll close <name>` | Protokoll-Sitzung schließen (Leader-only) |
-| `/unified help` | Befehlsliste anzeigen |
+| Command | Description |
+|---------|-------------|
+| `/unified create <name>` | Create a thread; the sender becomes the first member (and the **leader**) |
+| `/unified status` | List all threads + member count + mode |
+| `/unified join <name>` | Join an existing thread |
+| `/unified leave <name>` | Leave a thread |
+| `/unified members <name>` | List the members of a thread |
+| `/unified mode <name> <mode>` | Set the mode — `participant` / `reactive` / `off` / `silent` / `protokoll` |
+| `/unified protokoll open <name> [sitzung]` | Open a protokoll session (leader-only) |
+| `/unified protokoll close <name>` | Close the protokoll session (leader-only) |
+| `/unified help` | Show the command list |
 
-## Adressierung
+## Addressing
 
-Ein Member wird automatisch auf den virtuellen Thread gemappt — seine normalen Nachrichten laufen in die gemeinsame Session. Der Agent (oder ein Cron-Job) antwortet mit dem speziellen Ziel:
+A member is mapped onto the virtual thread automatically — their normal messages route to the shared session. The agent (or any cron job) replies with the special target:
 
 ```
 unified~<name>
 ```
 
-`send()` special-cased das `unified~`-Prefix **vor** der Bridge-Auflösung (`unified` ist kein registrierter Bridge-Prefix) und schreibt **eine Outbox-JSON pro Member** in dessen eigenes `outbox/<bridge>/`:
+`send()` special-cases the `unified~` prefix **before** bridge resolution (`unified` is not a registered bridge prefix) and writes **one outbox JSON per member** to that member's own `outbox/<bridge>/`:
 
 ```
 outbox/imsg/<uuid>.json   → target = imsg~<chat_id>
 outbox/talk/<uuid>.json   → target = talk~<chat_id>
 ```
 
-Jeder Wrapper liefert seine Kopie über seine eigene Plattform-API — **eine Agent-Antwort erreicht alle Bridges im Thread**.
+Each wrapper delivers its copy via its own platform API — **one agent reply reaches every bridge in the thread**.
 
-> **⚠️ Session chat_id muss routable sein.** Die Session `chat_id` ist `unified~<name>`, NICHT das nackte `unified`. Wenn der Agent *über die Session* antwortet (nicht explizit `unified~<name>` adressiert), sendet der Gateway an die Session chat_id. Ist das `unified`, findet `_resolve_bridge_or_none` kein `~`-Prefix → `bridge prefix unknown`. `unified~<name>` triggert den Multicast-Branch. (Regression: live entdeckt 2026-08-10, Commit `dcd959c`.)
+> **⚠️ The session chat_id must be routable.** The session `chat_id` is `unified~<name>`, NOT the bare `unified`. When the agent replies *through the session* (not by explicitly addressing `unified~<name>`), the gateway sends to the session chat_id. If that is `unified`, `_resolve_bridge_or_none` finds no `~` prefix → `bridge prefix unknown`. `unified~<name>` triggers the multicast branch. (Regression: caught live 2026-08-10, commit `dcd959c`.)
 
-## Teilnehmer-Modi
+## Participant modes
 
-Jeder Thread hat ein `mode`-Feld (Default `participant`), das steuert, wie der Adapter eingehende Member-Nachrichten dispatchen. `reactive`/`off`/`silent`/`protokoll` werden **deterministisch vor dem Gateway** durchgesetzt — nur `participant` lässt den Agenten entscheiden.
+Every thread has a `mode` field (default `participant`) that controls how the adapter dispatches incoming member messages. `reactive`/`off`/`silent`/`protokoll` are enforced **deterministically before the gateway** — only `participant` lets the agent decide.
 
-| Modus | Verhalten | Setzen mit |
-|-------|-----------|------------|
-| `participant` (Default) | Agent entscheidet, ob er antwortet. Via `platform_hint` gelehrt, `NO_REPLY` zu emittieren, wenn er nichts beizutragen hat; der Gateway unterdrückt diese Antwort. | `/unified mode <name> participant` |
-| `reactive` | Mention-Gating wie Gruppenchat: nur Nachrichten, die den Agenten erwähnen (`@hermes` oder `mention_patterns`-Match), werden dispatched. Un-erwähnte werden gedroppt + Inbox-Datei gelöscht. | `/unified mode <name> reactive` |
-| `off` | Agent bekommt gar nichts — kein Kontext, kein Turn. Jede Nachricht wird gedroppt + Inbox-Datei gelöscht. | `/unified mode <name> off` |
-| `silent` | Mute-Schalter: Agent liest mit, antwortet nie. Jede Nachricht wird gebuffert und periodisch (`digest_interval`) als **ein** Turn geflusht, markiert `[Silent digest — read only, do not reply]`. | `/unified mode <name> silent` |
-| `protokoll` | Protokoll-Modus: eingehende Nachrichten werden in die laufende Sitzung gesammelt statt dispatched. Agent antwortet nicht, solange eine Sitzung offen ist. | `/unified protokoll open <name>` |
+| Mode | Behaviour | Set with |
+|------|-----------|----------|
+| `participant` (default) | The agent decides whether to reply. Taught (via `platform_hint`) to emit `NO_REPLY` when it has nothing to contribute; the gateway suppresses that reply. | `/unified mode <name> participant` |
+| `reactive` | Mention-gating like a group chat: only messages that mention the agent (`@hermes` or a `mention_patterns` match) are dispatched. Un-mentioned messages are dropped + the inbox file is deleted. | `/unified mode <name> reactive` |
+| `off` | The agent gets nothing — no context, no turn. Every message is dropped + the inbox file is deleted. | `/unified mode <name> off` |
+| `silent` | Mute switch: the agent reads along but never replies. Every message is buffered and flushed periodically (`digest_interval`) as one bundled turn, marked `[Silent digest — read only, do not reply]`. | `/unified mode <name> silent` |
+| `protokoll` | Protocol mode: incoming messages are collected into the live session instead of dispatched. The agent does not reply while a session is open. | `/unified protokoll open <name>` |
 
-> **Hinweis:** `reactive`/`off` droppen die Nachricht im Adapter — der Agent sieht sie in diesem Turn nie. `silent` buffert sie in einen Digest (Agent liest mit, antwortet nie). `protokoll` sammelt sie in die Sitzung. Die gemeinsame Session akkumuliert trotzdem Historie aus den Turns, die der Agent *sieht*.
+> **Note:** `reactive`/`off` drop the message in the adapter — the agent never sees it on this turn. `silent` buffers it into a digest (the agent reads along but never replies). `protokoll` collects it into the session. The shared session still accumulates history from the turns the agent *does* see.
 
-### Leader-Markierung
+### Leader marking
 
-Der Thread-Ersteller (`created_by`) ist der **Leader**. Die Routing-Zeile, die der Adapter an jede Unified-Thread-Nachricht hängt, markiert den Leader explizit:
+The thread creator (`created_by`) is the thread's **leader**. The routing-context line the adapter appends to every unified-thread message marks the leader explicitly:
 
 ```
 Message from ronny, bridge imsg, unified thread 'projekt' (2 members), reply to unified~projekt [Ronny Leader]
 ```
 
-Nicht-Leader-Nachrichten tragen dieselbe Zeile ohne `[<Name> Leader]`-Suffix.
+Non-leader messages carry the same line without the `[<Name> Leader]` suffix.
 
-### Protokoll-Lifecycle
+### Protokoll lifecycle
 
-`protokoll` ist ein Leader-only-Lifecycle, um den Verlauf eines Threads als Artefakt festzuhalten (z.B. Besprechungsprotokoll):
+`protokoll` is a leader-only lifecycle for capturing a thread's conversation as an artifact (e.g. a meeting protocol):
 
-1. **Open** — der Leader führt `/unified protokoll open <name> [sitzung]` aus. Der Adapter legt einen Live-`protokoll`-State auf dem Thread an (`name`, `opened_at`, `messages: []`) und setzt den Modus auf `protokoll`. Ab jetzt werden eingehende Nachrichten in `protokoll.messages` **gesammelt** statt dispatched — der Agent antwortet nicht.
-2. **Close** — der Leader führt `/unified protokoll close <name>` aus. Der Adapter rendert die gesammelten Nachrichten als Markdown nach `<bridge_dir>/protokoll/<name>/<sitzung>.md`, löscht den Live-`protokoll`-State und setzt den Modus zurück auf `participant`.
-3. **Retroaktiv** — eine Sitzung, die keine Nachrichten sammelte, erzeugt ein Platzhalter-Artefakt; der Agent kann auf Anforderung die bestehende Thread-Historie zusammenfassen.
+1. **Open** — the leader runs `/unified protokoll open <name> [sitzung]`. The adapter records a live `protokoll` state on the thread (`name`, `opened_at`, `messages: []`) and switches the mode to `protokoll`. From then on incoming messages are **collected** into `protokoll.messages` instead of dispatched — the agent does not reply.
+2. **Close** — the leader runs `/unified protokoll close <name>`. The adapter renders the collected messages as Markdown to `<bridge_dir>/protokoll/<name>/<sitzung>.md`, clears the live `protokoll` state, and reverts the mode to `participant`.
+3. **Retroactive** — closing a session that collected no messages produces a placeholder artifact; the agent can be asked to summarize the existing thread history on demand.
 
-Nur der Leader (`created_by`) darf `open`/`close`. Nicht-Leader-Versuche werden mit klarer Meldung abgelehnt. Der Sitzungsname defaultet auf den Thread-Namen.
+Only the leader (`created_by`) may `open`/`close`. Non-leader attempts are rejected with a clear message. The session name defaults to the thread name when none is given.
 
-## Adaptive Zustandsmaschine
+## Adaptive state machine
 
-Jeder Thread trägt eine Zustandsmaschine, die das Dispatch-Verhalten an die Nachrichtenfrequenz anpasst:
+Every thread carries a state machine that adapts dispatch behaviour to message frequency:
 
 ```
 idle → active → digesting
 ```
 
-- **`idle`** — noch keine Nachrichten (Initialzustand).
-- **`active`** — Nachrichten gesehen; jede wird als eigener Turn dispatched (normales `participant`-Verhalten).
-- **`digesting`** — hohe Frequenz (3 in 30s oder 5 in 60s, Sliding Window). Eingehende Nachrichten werden **gebuffert** statt dispatched. Nach `digest_interval` (60s) wird der Buffer als **ein** Turn geflusht: ein `MessageEvent`, dessen Text ein `[System: N messages from M users]`-Header + eine `[HH:MM] [sender] text`-Zeile pro gebufferter Nachricht ist. Danach zurück zu `active` mit kurzem Cooldown.
+- **`idle`** — no messages yet (initial state).
+- **`active`** — messages seen; each is dispatched as its own turn (normal `participant` behaviour).
+- **`digesting`** — high frequency (3 messages in 30s, or 5 in 60s, sliding window). Incoming messages are **buffered** instead of dispatched. After `digest_interval` (60s) the buffer is **flushed as a single bundled turn**: one `MessageEvent` whose text is a `[System: N messages from M users]` header followed by one `[HH:MM] [sender] text` line per buffered message. After the flush the state returns to `active` with a short cooldown.
 
-State + Buffer persistieren in `unified_threads.json` (der `_adaptive`-Block) — ein Gateway-Restart verliert das in-flight Digest-Fenster nicht. Adaptive greift nur im **`participant`**-Modus. `silent` nutzt denselben Buffer, sammelt aber **immer** (Mute-Schalter), nicht nur bei hoher Frequenz.
+State + buffer persist in `unified_threads.json` (the `_adaptive` block), so a gateway restart doesn't lose the in-flight digest window. Adaptive only applies in **`participant`** mode. `silent` reuses the same buffer but always collects (mute switch), not just under high frequency.
 
-Die Schwellwerte sind Klassen-Konstanten auf `BridgeAdapter` (`ADAPTIVE_THRESHOLD_30`, `ADAPTIVE_THRESHOLD_60`, `ADAPTIVE_DIGEST_INTERVAL`, `ADAPTIVE_COOLDOWN`).
+The thresholds and intervals are class constants on `BridgeAdapter` (`ADAPTIVE_THRESHOLD_30`, `ADAPTIVE_THRESHOLD_60`, `ADAPTIVE_DIGEST_INTERVAL`, `ADAPTIVE_COOLDOWN`).
 
-## Reply-To-Ketten über Bridges
+## Reply-to chains across bridges
 
-Eine Reply-Kette auf einer einzelnen Bridge nutzt die bridge-lokale Message-ID (`reply_to`). Über Bridges ist diese ID bedeutungslos — der iMessage-Wrapper kennt die Talk-Message-ID nicht. Der Adapter überbrückt das mit einer persistierten Map:
+A reply chain on a single bridge uses the bridge-local message id (`reply_to`). Across bridges that id is meaningless — the iMessage wrapper doesn't know the Talk message id. The adapter bridges this gap with a persisted map:
 
 ```
 <bridge_dir>/reply_map.json
 { "<gateway_msg_id>": {"bridge": "imsg", "local_msg_id": "msg_abc"}, ... }
 ```
 
-- **Inbound** — beim Dispatch zeichnet der Adapter `gateway_msg_id → {bridge, local_msg_id}` auf. Die Gateway-ID ist die `message_id` des Events; die lokale ID ist die `id`/`message_id` der Inbox-JSON. Ohne Gateway-ID fällt er auf eine UUID zurück.
-- **Outbound** — `send()`/`send_image()`/`send_document()` (und der `unified~`-Multicast-Pfad) lösen ein `reply_to`, das einer Gateway-ID in der Map entspricht, zur gespeicherten `local_msg_id` auf. Eine bridge-lokale `reply_to` passiert unverändert.
+- **Inbound** — on dispatch, the adapter records `gateway_msg_id → {bridge, local_msg_id}`. The gateway id is the event's `message_id`; the local id is the inbox JSON's `id`/`message_id`. If no gateway id is available, it falls back to a UUID.
+- **Outbound** — `send()`/`send_image()`/`send_document()` (and the `unified~` multicast path) resolve a `reply_to` that matches a gateway id in the map to the stored `local_msg_id`. A bridge-local `reply_to` passes through unchanged.
 
-Die Datei wird bei `connect()` geladen und bei jeder Inbound-Registrierung neu geschrieben — Reply-Ketten überleben einen Restart.
+The file is loaded on `connect()` and rewritten on every inbound registration, so reply chains survive a restart.
 
-## Member-Deduplizierung
+## Member deduplication
 
-Dieselbe Person kann auf zwei Bridges unter verschiedenen Aliases erscheinen — `ronny.pietschke@icloud.com` auf iMessage und `ronny` auf Talk — aber es ist eine Person und sollte ein Member eines Unified Threads sein. Der Adapter führt Aliase über eine persistierte Identitäts-Map zusammen:
+The same person may appear on two bridges under different aliases — `ronny.pietschke@icloud.com` on iMessage and `ronny` on Talk — but they are one person and should be one member of a unified thread. The adapter collapses aliases via a persisted identity map:
 
 ```
 <bridge_dir>/identity_map.json
 { "ronny": ["ronny.pietschke@icloud.com", "+491****4968", "ronny"] }
 ```
 
-- **`_resolve_identity(user_id)`** mappt eine bridge-lokale user_id auf die kanonische Person (gibt die user_id selbst zurück, wenn unbekannt).
-- **Member-Record** — jeder Member bekommt ein `person`-Feld (die kanonische Identität) und ein `addresses`-Array aus `{bridge, chat_id, user_id}`-Einträgen.
-- **Join-Dedup** — `_cmd_unified_join` prüft, ob die kanonische `person` des Senders bereits Member ist. Wenn ja, wird die neue `{bridge}:{chat_id}`-Adresse in das `addresses`-Array des bestehenden Members gemerged statt einen doppelten Member-Eintrag zu erzeugen. Der primäre Member-Key bleibt die erste Adresse, von der die Person beigetreten ist.
-- **Inbound-Routing** — `_find_unified_for_member` scannt sowohl die Top-Level-`{bridge}:{chat_id}`-Keys als auch die gemerged `addresses`-Arrays, sodass eine Nachricht von jeder Bridge einer Person zum gemeinsamen Thread mappt.
-- **Multicast** — `send("unified~<name>")` multicastet an die primäre Adresse **und** jede gemerged Adresse (deduped), sodass eine Person auf zwei Bridges die Antwort auf beiden erhält.
+- **`_resolve_identity(user_id)`** maps a bridge-local user_id to the canonical person (returns the user_id itself if unknown).
+- **Member record** — every member gets a `person` field (the canonical identity) and an `addresses` array of `{bridge, chat_id, user_id}` entries.
+- **Join dedup** — `_cmd_unified_join` checks whether the sender's canonical `person` is already a member. If so, the new `{bridge}:{chat_id}` address is merged into the existing member's `addresses` array instead of creating a duplicate member entry. The primary member key stays the first address the person joined from.
+- **Inbound routing** — `_find_unified_for_member` scans both the top-level `{bridge}:{chat_id}` keys and the merged `addresses` arrays, so a message from any of a person's bridges still maps to the shared thread.
+- **Multicast** — `send("unified~<name>")` multicasts to every member's primary address **and** every merged address (deduped), so a person on two bridges receives the reply on both.
 
-Die Datei wird bei `connect()` geladen. Unbekannte Aliase passieren unverändert — die Identitäts-Map ist rein opt-in.
+The file is loaded on `connect()`. Unknown aliases pass through unchanged, so the identity map is purely opt-in.
 
-## Persistenz
+## Persistence
 
-Unified Threads werden in `<bridge_dir>/unified_threads.json` persistiert:
+Unified threads are persisted in `<bridge_dir>/unified_threads.json`:
 
 ```json
 {
@@ -161,12 +161,12 @@ Unified Threads werden in `<bridge_dir>/unified_threads.json` persistiert:
 }
 ```
 
-Member sind nach `{bridge}:{chat_id}` keyed (die erste Adresse, von der eine Person beigetreten ist). Die Datei wird bei `connect()` geladen und bei jedem mutierenden Befehl neu geschrieben — Threads überleben einen Gateway-Restart. Während eine Protokoll-Sitzung offen ist, hält `protokoll` `{name, opened_at, opened_by, messages: [...]}`; nach `close` revertiert es auf `null`. Der `_adaptive`-Block (T-061) trackt den Zustandsmaschinen-State + Message-Buffer.
+Members are keyed by `{bridge}:{chat_id}` (the first address a person joined from). The file is loaded on `connect()` and rewritten on every mutating command, so threads survive a gateway restart. While a protokoll session is open, `protokoll` holds `{name, opened_at, opened_by, messages: [...]}`; after `close` it reverts to `null`. The `_adaptive` block (T-061) tracks the per-thread state-machine state and message buffer.
 
-## Notes / Limits
+## Notes / limits
 
-- **Auth bleibt Framework-seitig.** Ein auf einer Bridge nicht autorisierter User wird vom Gateway-Authz-Mixin gedroppt, bevor das Adapter-Mapping ihn sieht — er kann keinem Thread beitreten.
-- **Mention-Patterns** treiben den `reactive`-Modus (und das Gruppenchat-Gating). Die Default-Patterns matchen `@hermes` / `hermes agent`; eine Bridge kann via `mention_patterns` in ihrem Manifest / `BRIDGE_MENTION_PATTERNS` übersteuern.
-- **`NO_REPLY`-Marker** ist nur im `participant`-Modus relevant — der Agent emittiert das Literal `NO_REPLY` (oder `[SILENT]`) und der Gateway unterdrückt die Zustellung. Die anderen Modi droppen oder buffern deterministisch im Adapter, bevor der Agent je aufgerufen wird.
-- **Adaptive + Modi** — adaptive Bündelung greift nur im `participant`-Modus; `reactive`/`off` droppen un-erwähnte Nachrichten ohnehin (kein Digest nötig), `protokoll` sammelt in die Sitzung, `silent` buffert immer (Mute-Schalter).
-- **Identitäts-Map ist opt-in** — ohne `identity_map.json`-Eintrag ist die `person` eines Senders gleich seiner rohen `user_id`, sodass zwei verschiedene Leute mit derselben ID auf verschiedenen Bridges gemerged würden. Explizite Einträge kontrollieren, welche Aliase zusammengehören.
+- **Auth stays framework-side.** A user not authorized on a bridge is dropped by the gateway's authz mixin before the adapter's mapping sees them — they cannot join a thread.
+- **Mention patterns** drive `reactive` mode (and group-chat gating). The default patterns match `@hermes` / `hermes agent`; a bridge can override via `mention_patterns` in its manifest / `BRIDGE_MENTION_PATTERNS`.
+- **`NO_REPLY` marker** is only relevant in `participant` mode — the agent emits the literal token `NO_REPLY` (or `[SILENT]`) and the gateway suppresses delivery. The other modes drop or buffer deterministically in the adapter before the agent is ever called.
+- **Adaptive + modes** — adaptive bundling only applies in `participant` mode; `reactive`/`off` drop un-mentioned messages anyway (no digest needed), `protokoll` collects into the session, `silent` always buffers (mute switch).
+- **Identity map is opt-in** — without an `identity_map.json` entry, a sender's `person` equals its raw `user_id`, so two different people with the same id on different bridges would be merged. Add explicit entries to control which aliases belong together.
