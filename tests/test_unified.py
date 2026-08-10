@@ -800,3 +800,21 @@ def test_reply_map_persist_roundtrip(tmp_path):
     a._reply_map = {}
     a._load_reply_map()
     assert a._reply_map["gw_1"]["local_msg_id"] == "msg_abc"
+
+
+def test_reply_map_registers_inbound(tmp_path):
+    a = _make_adapter(tmp_path)
+    a._extra["allow_all"] = "true"
+    a._load_reply_map()
+    a.handle_message = AsyncMock()
+
+    async def run():
+        await a._process_incoming("imsg", {
+            "sender": "ronny", "text": "Hallo", "id": "msg_abc",
+            "chat": {"id": "u1", "type": "direct"},
+        }, tmp_path / "x.json")
+
+    asyncio.run(run())
+    # handle_message was called with a MessageEvent whose message_id is the
+    # gateway_msg_id; the map must contain the mapping.
+    assert any(v.get("local_msg_id") == "msg_abc" for v in a._reply_map.values())

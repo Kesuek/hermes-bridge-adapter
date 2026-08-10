@@ -1117,6 +1117,15 @@ class BridgeAdapter(BasePlatformAdapter):
             reply_to_message_id=data.get("reply_to"),
         )
 
+        # Register the gateway_msg_id → {bridge, local_msg_id} mapping so
+        # cross-bridge reply chains resolve (T-060). The gateway assigns a
+        # message_id to the event; we map it to the bridge-local id.
+        local_id = data.get("id") or data.get("message_id") or ""
+        if local_id:
+            gw_id = getattr(event, "message_id", None) or str(uuid.uuid4())
+            self._reply_map[gw_id] = {"bridge": bridge, "local_msg_id": local_id}
+            self._save_reply_map()
+
         # Mention gating for group chats
         if chat_type != "direct" and not self._is_mentioned(text, bridge):
             logger.debug("Not mentioned in group chat, skipping: %s", filepath)
