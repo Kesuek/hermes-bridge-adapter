@@ -1186,3 +1186,17 @@ def test_unified_send_to_thread(tmp_path):
     # beide Member-Outboxen haben die Nachricht
     assert (a._bridge_dir / "outbox" / "imsg").exists()
     assert (a._bridge_dir / "outbox" / "talk").exists()
+
+
+# ── T-065: Identity-Claim (Challenge-Response) ───────────────────────
+
+
+def test_pending_claims_persist_roundtrip(tmp_path):
+    """T-065 Task 1: pending_claims survives save→load roundtrip."""
+    a = _make_adapter(tmp_path)
+    a._pending_claims = {"abc123": {"code": "123456", "source": "imsg:ronny.pietschke@icloud.com",
+                                     "target": "talk:ronny", "expires": 1786368000.0}}
+    a._save_pending_claims()
+    a._pending_claims = {}
+    a._load_pending_claims()
+    assert a._pending_claims["abc123"]["code"] == "123456"

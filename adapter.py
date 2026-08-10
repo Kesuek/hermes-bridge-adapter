@@ -311,6 +311,12 @@ class BridgeAdapter(BasePlatformAdapter):
         # ``_find_unified_for_member`` finds no membership match.
         self._active_threads: dict[str, str] = {}
 
+        # Pending identity claims (T-065): {claim_id → {code, source, target,
+        # expires}}. A ``/unified identity claim <bridge>~<target>`` creates an
+        # entry and sends a code to the target bridge; ``/unified identity
+        # confirm <code>`` from the target merges the two identities.
+        self._pending_claims: dict[str, dict] = {}
+
     # ── Lifecycle ────────────────────────────────────────────────────
 
     async def connect(self, **kwargs) -> bool:
@@ -349,6 +355,10 @@ class BridgeAdapter(BasePlatformAdapter):
         # Load the active_thread map (T-064) so /unified switch persists
         # across restarts.
         self._load_active_threads()
+
+        # Load pending identity claims (T-065) so an in-flight challenge-
+        # response survives an adapter restart.
+        self._load_pending_claims()
 
         # Whether or not any bridges are registered yet, the adapter boots
         # and the registry loop keeps watching for manifests to appear at
@@ -696,6 +706,36 @@ class BridgeAdapter(BasePlatformAdapter):
         if not p:
             return
         self._atomic_write_json(p, self._active_threads)
+
+    # ── Pending claims (T-065) ──────────────────────────────────────────────
+
+    def _pending_claims_path(self) -> Path:
+        """Path to the ``pending_claims.json`` persistence file."""
+        return self._bridge_dir / "pending_claims.json" if self._bridge_dir else Path()
+
+    def _load_pending_claims(self) -> None:
+        """Load pending identity claims from ``pending_claims.json`` (best-effort).
+
+        Missing or unreadable files reset ``_pending_claims`` to an empty dict
+        so the adapter keeps running instead of crashing on a bad file.
+        """
+        self._pending_claims = {}
+        p = self._pending_claims_path()
+        if not p or not p.exists():
+            return
+        try:
+            data = json.loads(p.read_text("utf-8"))
+            if isinstance(data, dict):
+                self._pending_claims = data
+        except (json.JSONDecodeError, OSError) as e:
+            logger.warning("Bad pending_claims.json: %s", e)
+
+    def _save_pending_claims(self) -> None:
+        """Persist pending identity claims to ``pending_claims.json`` (atomic write)."""
+        p = self._pending_claims_path()
+        if not p:
+            return
+        self._atomic_write_json(p, self._pending_claims)
 
     @staticmethod
     def _unified_member_key(bridge: str, data: dict) -> str:
