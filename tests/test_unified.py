@@ -1217,3 +1217,28 @@ def test_identity_claim_sends_code(tmp_path):
     assert "code" in data["text"].lower()
     # pending claim existiert
     assert a._pending_claims, "claim should create a pending entry"
+
+
+def test_identity_confirm_merges(tmp_path):
+    """T-065 Task 3: /unified identity confirm merges the two identities.
+
+    A claim from imsg:ronny.pietschke@icloud.com targets talk~ronny. The
+    confirm must come from talk:ronny; afterwards both addresses resolve
+    to the same canonical person and the pending claim is cleared.
+    """
+    a = _make_adapter(tmp_path)
+    a._bridges = ["imsg", "talk"]
+    a._load_unified_threads()
+    a._load_pending_claims()
+    a._load_identity_map()
+    # claim von imsg auf talk~ronny
+    asyncio.run(a._cmd_unified_identity_claim("imsg", {"sender": "ronny.pietschke@icloud.com"}, "talk~ronny"))
+    claim_id = next(iter(a._pending_claims))
+    code = a._pending_claims[claim_id]["code"]
+    # confirm von talk
+    result = a._cmd_unified_identity_confirm("talk", {"sender": "ronny"}, code)
+    assert "confirmed" in result.lower() or "merged" in result.lower()
+    # identity_map hat die Zuordnung
+    assert a._resolve_identity("imsg", "ronny.pietschke@icloud.com") == a._resolve_identity("talk", "ronny")
+    # pending claim ist weg
+    assert not a._pending_claims

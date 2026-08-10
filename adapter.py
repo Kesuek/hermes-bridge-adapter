@@ -619,6 +619,19 @@ class BridgeAdapter(BasePlatformAdapter):
         except (json.JSONDecodeError, OSError) as e:
             logger.warning("Bad identity_map.json: %s", e)
 
+    def _save_identity_map(self) -> None:
+        """Persist the identity map to ``identity_map.json`` (atomic write).
+
+        The identity map was historically hand-edited; T-065 now also writes
+        it programmatically (identity-claim confirm merges a new alias into
+        a person's entry). The atomic write guards against torn writes from
+        concurrent bridges.
+        """
+        p = self._identity_map_path()
+        if not p:
+            return
+        self._atomic_write_json(p, self._identity_map)
+
     def _resolve_identity(self, wrapper_or_user_id: str, user_id: str | None = None) -> str:
         """Map a ``(wrapper, user_id)`` pair to a canonical person (T-062/063).
 
@@ -1178,6 +1191,59 @@ class BridgeAdapter(BasePlatformAdapter):
         # bridge can confirm (challenge-response).
         await self._write_outbox(target_bridge, target, text=f"Identity claim code: {code}")
         return f"Claim sent. Confirm with /unified identity confirm {code} from {target_bridge}."
+
+    def _cmd_unified_identity_confirm(
+        self, bridge: str, data: dict, code: str
+    ) -> str:
+        """Confirm an identity claim with the code (T-065).
+
+        The confirm must come from the claimed target bridge/identity — only
+        someone who reads the target bridge received the code, so matching it
+        proves control of both accounts (challenge-response). On success the
+        target alias is merged into the source person's identity-map entry and
+        the pending claim is cleared.
+        """
+        now = time.time()
+        for claim_id, claim in list(self._pending_claims.items()):
+            if claim["code"] != code:
+                continue
+            if now > claim["expires"]:
+                del self._pending_claims[claim_id]
+                self._save_pending_claims()
+                return "Claim expired. Start a new one with /unified identity claim."
+            # The confirm must come from the target bridge/identity.
+            target_bridge, _, target_id = claim["target"].partition("~")
+            if bridge != target_bridge or data.get("sender", "") != target_id:
+                return "Confirm must come from the claimed target identity."
+            # Merge: add the target alias to the source person.
+            source_bridge, _, source_id = claim["source"].partition(":")
+            person = self._resolve_identity(source_bridge, source_id)
+            entry = self._identity_map.get(person)
+            if isinstance(entry, dict):
+                entry.setdefault("aliases", [])
+                entry.setdefault("wrappers", {})
+                if target_id not in entry["aliases"]:
+                    entry["aliases"].append(target_id)
+                entry["wrappers"][target_bridge] = target_id
+            elif isinstance(entry, list):
+                # legacy bare list → upgrade to current shape
+                if target_id not in entry:
+                    entry.append(target_id)
+                self._identity_map[person] = {
+                    "aliases": entry,
+                    "wrappers": {target_bridge: target_id},
+                }
+            else:
+                # no entry yet → create one
+                self._identity_map[person] = {
+                    "aliases": [source_id, target_id],
+                    "wrappers": {source_bridge: source_id, target_bridge: target_id},
+                }
+            self._save_identity_map()
+            del self._pending_claims[claim_id]
+            self._save_pending_claims()
+            return f"Confirmed. {source_id} and {target_id} are now the same person."
+        return "Invalid or unknown code."
 
     # ── Adaptive state machine (T-061) ──────────────────────────────────
 
