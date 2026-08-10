@@ -22,3 +22,6 @@ optional_env:
   - name: BRIDGE_HOME_CHANNEL
     description: Home channel for cron delivery
     password: false
+  - name: BRIDGE_AGENT_HANDLE
+    description: Agent handle in unified threads (default "hermes")
+    password: false

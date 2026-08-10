@@ -1296,3 +1296,19 @@ def test_resolve_unified_handle(tmp_path):
     assert a._resolve_unified_handle("imsg", "ronny.pietschke@icloud.com") == "unified~Kesuek"
     # Kein Username → Fallback auf rohes Handle
     assert a._resolve_unified_handle("imsg", "anja@example.com") == "unified~anja@example.com"
+
+
+def test_agent_handle_default(tmp_path):
+    """T-066 Task 2: agent handle defaults to 'hermes'."""
+    a = _make_adapter(tmp_path)
+    assert a._agent_handle == "hermes"  # default
+
+
+def test_agent_handle_from_config(tmp_path):
+    """T-066 Task 2: agent handle is read from config.extra['agent_handle']."""
+    from gateway.config import PlatformConfig
+    bridge_dir = tmp_path / "bridge"
+    bridge_dir.mkdir()
+    cfg = PlatformConfig(enabled=True, extra={"bridge_dir": str(bridge_dir), "agent_handle": "felix"})
+    a = BridgeAdapter(cfg)
+    assert a._agent_handle == "felix"

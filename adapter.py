@@ -323,6 +323,15 @@ class BridgeAdapter(BasePlatformAdapter):
         # alongside the person's addresses.
         self._usernames: dict[str, str] = {}
 
+        # Agent handle (T-066): the handle the agent uses in unified threads.
+        # Defaults to "hermes"; configurable via config.extra["agent_handle"]
+        # or BRIDGE_AGENT_HANDLE. Shown in relay messages and the routing
+        # context so the agent has one consistent identity across bridges.
+        self._agent_handle = (
+            extra.get("agent_handle")
+            or os.getenv("BRIDGE_AGENT_HANDLE", "hermes")
+        ).strip() or "hermes"
+
     # ── Lifecycle ────────────────────────────────────────────────────
 
     async def connect(self, **kwargs) -> bool:
