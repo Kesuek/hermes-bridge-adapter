@@ -504,8 +504,8 @@ In `participant` mode, the adapter watches message frequency per unified thread.
 
 ```
 [System: 7 messages from 2 users]
-[10:42] [ronny] foo
-[10:42] [anja] bar
+[10:42] [alice] foo
+[10:42] [bob] bar
 ...
 ```
 
@@ -516,7 +516,7 @@ From the wrapper's perspective nothing changes: the inbox messages it writes are
 The adapter maintains a persisted identity map in `<bridge_dir>/identity_map.json`:
 
 ```json
-{ "ronny": ["ronny.pietschke@icloud.com", "+491714824968", "ronny"] }
+{ "alice": ["alice@example.com", "+49 170 1234567", "alice"] }
 ```
 
 When the same person joins a unified thread from a second bridge, the adapter merges the new `{bridge}:{chat_id}` address into the existing member's `addresses` array instead of creating a duplicate member. The wrapper's role is unchanged — it keeps writing `/unified join` from each bridge as normal; the adapter dedups transparently. Multicast replies (`unified~<name>`) are delivered to every member address, including merged ones, so a person on two bridges receives the reply on both.

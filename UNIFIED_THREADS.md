@@ -63,7 +63,7 @@ A user with multiple unified threads picks one as their **active thread** via `/
 
 ```
 <bridge_dir>/active_threads.json
-{ "ronny": "projekt", "anja": "team" }
+{ "alice": "projekt", "bob": "team" }
 ```
 
 - **Membership required** — `switch` is only allowed on threads the user is already a member of. It's "which of my threads is active", not "join a new one". Join first with `/unified join <name>`.
@@ -89,7 +89,7 @@ This is what you want when a chat is physically mapped as a thread member (so `_
 
 ```
 <bridge_dir>/paused_threads.json
-{ "ronny": ["Team1"], "anja": [] }
+{ "alice": ["Team1"], "bob": [] }
 ```
 
 - **Routing** — in `_process_incoming`, after the membership lookup finds the thread, the adapter checks the sender's paused set. If the thread is paused, the message is **not** routed into `unified~<name>` — it falls through to the normal per-bridge chat.
@@ -103,8 +103,8 @@ In a Unified Thread, an incoming message from one member is **mirrored to the ou
 
 ```
 imsg: "Hallo alle"  →  agent (dispatched normally)
-                  →  talk outbox:  "[Ronny] Hallo alle"
-                  →  matrix outbox: "[Ronny] Hallo alle"
+                  →  talk outbox:  "[Alice] Hallo alle"
+                  →  matrix outbox: "[Alice] Hallo alle"
                   →  imsg outbox:  (nothing — source is excluded)
 ```
 
@@ -130,7 +130,7 @@ Every thread has a `mode` field (default `participant`) that controls how the ad
 
 ### Leader marking
 
-The thread creator (`created_by`) is the thread's **leader**. The `protokoll` lifecycle (below) is restricted to the leader; non-leader attempts are rejected. (Note: the routing-context line the adapter appends no longer marks the leader explicitly — since T-066 it uses the **unified handle** instead of the raw bridge identity and names the source bridge: `Message from Kesuek over talk~, unified thread 'Team1', reply to unified~Team1`.)
+The thread creator (`created_by`) is the thread's **leader**. The `protokoll` lifecycle (below) is restricted to the leader; non-leader attempts are rejected. (Note: the routing-context line the adapter appends no longer marks the leader explicitly — since T-066 it uses the **unified handle** instead of the raw bridge identity and names the source bridge: `Message from alice over talk~, unified thread 'Team1', reply to unified~Team1`.)
 
 ### Protokoll lifecycle
 
@@ -174,19 +174,19 @@ The file is loaded on `connect()` and rewritten on every inbound registration, s
 
 ## Member deduplication
 
-The same person may appear on two bridges under different aliases — `ronny.pietschke@icloud.com` on iMessage and `ronny` on Talk — but they are one person and should be one member of a unified thread. The adapter collapses aliases via a persisted identity map. As of T-063 the map records **which wrapper each alias belongs to**, so a `(wrapper, user_id)` pair resolves precisely (preventing two people who share a bare alias on different wrappers from being merged):
+The same person may appear on two bridges under different aliases — `alice@example.com` on iMessage and `alice` on Talk — but they are one person and should be one member of a unified thread. The adapter collapses aliases via a persisted identity map. As of T-063 the map records **which wrapper each alias belongs to**, so a `(wrapper, user_id)` pair resolves precisely (preventing two people who share a bare alias on different wrappers from being merged):
 
 ```
 <bridge_dir>/identity_map.json
 {
-  "ronny": {
-    "aliases": ["ronny.pietschke@icloud.com", "+491****4968", "ronny"],
-    "wrappers": {"imsg": "ronny.pietschke@icloud.com", "talk": "ronny"}
+  "alice": {
+    "aliases": ["alice@example.com", "+49 170 1234567", "alice"],
+    "wrappers": {"imsg": "alice@example.com", "talk": "alice"}
   }
 }
 ```
 
-- **`_resolve_identity(wrapper, user_id)`** maps a `(wrapper, user_id)` pair to the canonical person: a wrapper-declared alias match wins; a bare-alias match is the fallback; an unknown pair returns the `user_id` itself. The legacy bare-list shape (`{"ronny": ["..."]}`) and the 1-arg call form remain supported for backwards compatibility.
+- **`_resolve_identity(wrapper, user_id)`** maps a `(wrapper, user_id)` pair to the canonical person: a wrapper-declared alias match wins; a bare-alias match is the fallback; an unknown pair returns the `user_id` itself. The legacy bare-list shape (`{"alice": ["..."]}`) and the 1-arg call form remain supported for backwards compatibility.
 - **Member record** — every member gets a `person` field (the canonical identity) and an `addresses` array of `{bridge, chat_id, user_id}` entries.
 - **Join dedup** — `_cmd_unified_join` checks whether the sender's canonical `person` is already a member. If so, the new `{bridge}:{chat_id}` address is merged into the existing member's `addresses` array instead of creating a duplicate member entry. The primary member key stays the first address the person joined from.
 - **Inbound routing** — `_find_unified_for_member` scans both the top-level `{bridge}:{chat_id}` keys and the merged `addresses` arrays, so a message from any of a person's bridges still maps to the shared thread.
@@ -215,7 +215,7 @@ Unified threads decouple the on-thread identity from the raw bridge identity. Ev
 
 - **User handle** — `_resolve_unified_handle(bridge, user_id)` returns `unified~<username>` when the person has a display name set (T-065), else falls back to the raw `unified~<user_id>`. This is the handle shown in the relay copies (`[Name] text` mirrored to the other member bridges) so all participants see a consistent name across messenger boundaries.
 - **Agent handle** — the agent's own handle comes from the config (`extra["agent_handle"]` / `BRIDGE_AGENT_HANDLE`), defaulting to `hermes`. It is static (no `/unified` command mutates it).
-- **Display prefix** — the relay strips the `unified~` prefix for display, so a message from `Kesuek` reads `[Kesuek] text` rather than `[unified~Kesuek] text`. In a unified thread everything is unified, so the prefix is noise on screen.
+- **Display prefix** — the relay strips the `unified~` prefix for display, so a message from `alice` reads `[alice] text` rather than `[unified~alice] text`. In a unified thread everything is unified, so the prefix is noise on screen.
 
 Backwards compatible: without `agent_handle` in the config it stays `hermes`; without a username the user handle falls back to the raw identity. No existing thread breaks.
 
@@ -228,15 +228,15 @@ Unified threads are persisted in `<bridge_dir>/unified_threads.json`:
   "projekt": {
     "name": "projekt",
     "created_at": "2026-08-10T10:00:00+02:00",
-    "created_by": "ronny",
+    "created_by": "alice",
     "members": {
       "imsg:u1": {
-        "bridge": "imsg", "chat_id": "u1", "user_id": "ronny.pietschke@icloud.com",
-        "user_name": "ronny.pietschke@icloud.com", "person": "ronny",
+        "bridge": "imsg", "chat_id": "u1", "user_id": "alice@example.com",
+        "user_name": "alice@example.com", "person": "alice",
         "joined_at": "...",
         "addresses": [
-          {"bridge": "imsg", "chat_id": "u1", "user_id": "ronny.pietschke@icloud.com"},
-          {"bridge": "talk", "chat_id": "t1", "user_id": "ronny"}
+          {"bridge": "imsg", "chat_id": "u1", "user_id": "alice@example.com"},
+          {"bridge": "talk", "chat_id": "t1", "user_id": "alice"}
         ]
       }
     },
