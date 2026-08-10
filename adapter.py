@@ -676,6 +676,20 @@ class BridgeAdapter(BasePlatformAdapter):
                     return person
         return uid  # unknown → itself
 
+    def _resolve_unified_handle(self, bridge: str, user_id: str) -> str:
+        """Resolve a user's unified-thread handle (T-066).
+
+        Returns ``unified~<username>`` when a display name is set (T-065),
+        else falls back to the raw identity ``unified~<user_id>``. This is the
+        handle shown in relay messages and the routing context — the thread is
+        decoupled from raw bridge identities.
+        """
+        person = self._resolve_identity(bridge, user_id)
+        name = self._usernames.get(person)
+        if name:
+            return f"unified~{name}"
+        return f"unified~{user_id}"
+
     def _find_unified_for_member(self, bridge: str, chat_id: str) -> Optional[str]:
         """Return the unified thread name ``{bridge}:{chat_id}`` belongs to.
 
@@ -1658,7 +1672,10 @@ class BridgeAdapter(BasePlatformAdapter):
             # the humans see the message. Placed BEFORE the adaptive buffer
             # check so the humans see the message immediately even while the
             # agent is digesting. The agent still gets the original below.
-            relay_name = data.get("sender_name") or sender
+            # Use the user's configured display name (T-065) if set, else the
+            # raw sender name — so the relay shows "Kesuek" not the raw alias.
+            person = self._resolve_identity(bridge, sender)
+            relay_name = self._usernames.get(person) or data.get("sender_name") or sender
             await self._relay_to_other_members(unified_name, bridge, relay_name, text)
         else:
             routable_chat_id = f"{bridge}~{chat_id}"

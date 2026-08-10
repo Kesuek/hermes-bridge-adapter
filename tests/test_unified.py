@@ -1280,3 +1280,19 @@ def test_status_lists_merged_addresses_and_username(tmp_path):
     assert "Ronny P." in status
     assert "ronny.pietschke@icloud.com" in status
     assert "ronny" in status
+
+
+# ── T-066: Unified Handles ───────────────────────────────────────────
+
+
+def test_resolve_unified_handle(tmp_path):
+    """T-066 Task 1: _resolve_unified_handle returns unified~<username>
+    when a display name is set, else falls back to unified~<user_id>."""
+    a = _make_adapter(tmp_path)
+    a._identity_map = {"ronny": {"wrappers": {"imsg": "ronny.pietschke@icloud.com"},
+                                 "aliases": ["ronny.pietschke@icloud.com"]}}
+    a._usernames = {"ronny": "Kesuek"}
+    # Username gesetzt → unified~Kesuek
+    assert a._resolve_unified_handle("imsg", "ronny.pietschke@icloud.com") == "unified~Kesuek"
+    # Kein Username → Fallback auf rohes Handle
+    assert a._resolve_unified_handle("imsg", "anja@example.com") == "unified~anja@example.com"
