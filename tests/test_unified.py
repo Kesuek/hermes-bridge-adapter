@@ -194,7 +194,14 @@ def test_unified_inbound_maps_to_virtual_thread(tmp_path):
     asyncio.run(run())
     event = a.handle_message.await_args[0][0]
     assert event.source.chat_type == "thread"
-    assert event.source.chat_id == "unified"
+    # The session chat_id MUST be the routable address "unified~<name>",
+    # NOT the bare "unified" slot. When the agent replies through the
+    # session, the gateway sends to this chat_id; "unified" has no "~"
+    # prefix and fails routing, while "unified~projekt" triggers the
+    # multicast branch in send(). (Regression: caught live 2026-08-10 —
+    # agent reply to a unified-thread message failed with "bridge prefix
+    # unknown" because the session chat_id was "unified".)
+    assert event.source.chat_id == "unified~projekt"
     assert event.source.thread_id == "projekt"
     assert "unified thread 'projekt'" in event.text
 

@@ -914,14 +914,25 @@ class BridgeAdapter(BasePlatformAdapter):
         # Unified thread mapping (T-058): if {bridge}:{chat_id} is a member of
         # a unified thread, map the session onto the shared virtual thread so
         # all members share one agent session (chat_type="thread",
-        # chat_id="unified", thread_id=<name>). Replies go to unified~<name>.
+        # chat_id="unified~<name>", thread_id=<name>). Replies go to
+        # unified~<name>.
+        #
+        # CRITICAL: the session chat_id MUST be the routable address
+        # "unified~<name>", NOT the bare "unified" slot. When the agent
+        # replies *through the session* (not by explicitly addressing
+        # unified~<name>), the gateway sends to the session chat_id. If that
+        # is "unified", _resolve_bridge_or_none finds no "~" prefix and the
+        # reply fails with "bridge prefix unknown". Using "unified~<name>"
+        # triggers the multicast branch in send(). All members map to the
+        # same "unified~<name>", so the shared session is preserved.
         unified_name = self._find_unified_for_member(bridge, chat_id)
         if unified_name:
             thread = self._unified_threads[unified_name]
             n_members = len(thread.get("members", {}))
+            unified_chat_id = f"unified~{unified_name}"
             source = SessionSource(
                 platform=Platform("bridge-adapter"),
-                chat_id="unified",
+                chat_id=unified_chat_id,
                 chat_name=unified_name,
                 chat_type="thread",
                 user_id=sender,
