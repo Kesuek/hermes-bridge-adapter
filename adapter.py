@@ -1644,24 +1644,28 @@ class BridgeAdapter(BasePlatformAdapter):
             thread = self._unified_threads[unified_name]
             n_members = len(thread.get("members", {}))
             unified_chat_id = f"unified~{unified_name}"
+            # The user's unified handle (T-066) is used for BOTH the session
+            # user_name (the [Kesuek] prefix the gateway shows) AND the
+            # routing context. The thread is decoupled from raw bridge
+            # identities — the sender's display name is the unified handle,
+            # not the talk/imsg sender_name.
+            from_handle = self._resolve_unified_handle(bridge, sender)
+            display_handle = from_handle[len("unified~"):] if from_handle.startswith("unified~") else from_handle
             source = SessionSource(
                 platform=Platform("bridge-adapter"),
                 chat_id=unified_chat_id,
                 chat_name=unified_name,
                 chat_type="thread",
                 user_id=sender,
-                user_name=data.get("sender_name") or sender,
+                user_name=display_handle,
                 thread_id=unified_name,
             )
             # Routing context for the AGENT (what it sees on an inbound
-            # message). Use the user's unified handle (T-066) so the agent
-            # sees "[Message from Kesuek ...]" not the raw bridge identity.
-            # The thread is decoupled from raw bridge identities.
-            from_handle = self._resolve_unified_handle(bridge, sender)
-            if from_handle.startswith("unified~"):
-                from_handle = from_handle[len("unified~"):]
+            # message). Names the unified handle AND the source bridge so the
+            # agent knows where the message came from: "Message from Kesuek
+            # over talk~, unified thread 'Team1', reply to unified~Team1".
             routing_ctx = (
-                f"Message from {from_handle}, "
+                f"Message from {display_handle} over {bridge}~, "
                 f"unified thread '{unified_name}', "
                 f"reply to unified~{unified_name}"
             )

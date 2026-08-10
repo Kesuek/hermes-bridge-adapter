@@ -409,13 +409,15 @@ def test_unified_routing_uses_unified_handle(tmp_path):
 
     asyncio.run(run())
     event = a.handle_message.await_args[0][0]
-    assert "Message from Kesuek" in event.text
+    assert "Message from Kesuek over imsg~" in event.text
     assert "unified thread 'projekt'" in event.text
     assert "reply to unified~projekt" in event.text
     # No raw bridge identity, no leader suffix, no member count.
     assert "ronny.pietschke@icloud.com" not in event.text.split("[Message")[1].split("]")[0]
     assert "Leader]" not in event.text
     assert "(2 members)" not in event.text
+    # The session user_name is the unified handle, not the raw sender_name.
+    assert event.source.user_name == "Kesuek"
 
 
 def test_unified_routing_no_leader_marker_for_non_leader(tmp_path):
