@@ -27,6 +27,7 @@ import re
 import shutil
 import time
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -56,6 +57,11 @@ DEFAULT_MENTION_PATTERNS = [
     r"(?<![\\w@])@?hermes\\s+agent\\b[,:\\-]?",
     r"(?<![\\w@])@?hermes\\b[,:\\-]?",
 ]
+
+
+def _now_iso() -> str:
+    """Current timestamp in local ISO 8601 (e.g. ``2026-08-10T10:00:00+02:00``)."""
+    return datetime.now(timezone.utc).astimezone().isoformat()
 
 
 # ── Registry: Manifest Schema + Loader ───────────────────────────────
@@ -479,6 +485,210 @@ class BridgeAdapter(BasePlatformAdapter):
         except OSError as e:
             logger.error("Failed to save unified_threads.json: %s", e)
 
+    def _find_unified_for_member(self, bridge: str, chat_id: str) -> Optional[str]:
+        """Return the unified thread name ``{bridge}:{chat_id}`` belongs to.
+
+        A member is identified by the key ``{bridge}:{chat_id}`` in a
+        thread's ``members`` dict. Returns the first matching thread name
+        (or ``None`` if not a member of any thread).
+        """
+        key = f"{bridge}:{chat_id}"
+        for name, thread in self._unified_threads.items():
+            if key in thread.get("members", {}):
+                return name
+        return None
+
+    @staticmethod
+    def _unified_member_key(bridge: str, data: dict) -> str:
+        """Build the member key ``{bridge}:{chat_id}`` for a ``/unified`` cmd."""
+        chat_id = (data.get("chat", {}) or {}).get("id", "") or data.get("sender", "")
+        return f"{bridge}:{chat_id}"
+
+    def _unified_member_record(self, bridge: str, data: dict) -> dict:
+        """Build a member record (for storage in ``members``)."""
+        chat_id = (data.get("chat", {}) or {}).get("id", "") or data.get("sender", "")
+        return {
+            "bridge": bridge,
+            "chat_id": chat_id,
+            "user_id": data.get("sender", ""),
+            "user_name": data.get("sender_name") or data.get("sender", ""),
+            "joined_at": _now_iso(),
+        }
+
+    async def _send_reply(self, bridge: str, data: dict, message: str) -> None:
+        """Write an outbox reply to the sender of a ``/unified`` command.
+
+        Uses the ``~``-addressed routable form so the wrapper on the other
+        end can route it back to the originating chat.
+        """
+        chat_id = (data.get("chat", {}) or {}).get("id", "") or data.get("sender", "")
+        target = f"{bridge}~{chat_id}"
+        await self._write_outbox(bridge, target, text=message)
+
+    # ── /unified command handlers ────────────────────────────────────
+
+    async def _handle_unified_command(
+        self, bridge: str, data: dict, filepath: Path
+    ) -> None:
+        """Parse and dispatch a ``/unified`` command from an inbox message."""
+        parts = (data.get("text", "") or "").split()
+        # parts[0] == "/unified"
+        sub = parts[1] if len(parts) > 1 else "help"
+        args = parts[2:]
+
+        dispatch = {
+            "help": None,
+            "create": self._cmd_unified_create,
+            "status": self._cmd_unified_status,
+            "join": self._cmd_unified_join,
+            "leave": self._cmd_unified_leave,
+            "members": self._cmd_unified_members,
+            "mode": self._cmd_unified_mode,
+        }
+        handler = dispatch.get(sub)
+        if sub == "help":
+            await self._send_reply(bridge, data, self._unified_help_text())
+        elif handler is None:
+            await self._send_reply(
+                bridge, data,
+                f"Unknown /unified command '{sub}'. Try /unified help.",
+            )
+        elif sub == "status":
+            await self._send_reply(bridge, data, self._cmd_unified_status(bridge, data))
+        elif sub == "create":
+            name = args[0] if args else ""
+            if not name:
+                await self._send_reply(bridge, data, "Usage: /unified create <name>")
+            else:
+                await self._send_reply(bridge, data, self._cmd_unified_create(bridge, data, name))
+        elif sub == "join":
+            name = args[0] if args else ""
+            if not name:
+                await self._send_reply(bridge, data, "Usage: /unified join <name>")
+            else:
+                await self._send_reply(bridge, data, self._cmd_unified_join(bridge, data, name))
+        elif sub == "leave":
+            name = args[0] if args else ""
+            if not name:
+                await self._send_reply(bridge, data, "Usage: /unified leave <name>")
+            else:
+                await self._send_reply(bridge, data, self._cmd_unified_leave(bridge, data, name))
+        elif sub == "members":
+            name = args[0] if args else ""
+            if not name:
+                await self._send_reply(bridge, data, "Usage: /unified members <name>")
+            else:
+                await self._send_reply(bridge, data, self._cmd_unified_members(bridge, data, name))
+        elif sub == "mode":
+            name = args[0] if args else ""
+            mode = args[1] if len(args) > 1 else ""
+            if not name or not mode:
+                await self._send_reply(
+                    bridge, data,
+                    "Usage: /unified mode <name> <participant|reactive|silent|protokoll>",
+                )
+            else:
+                await self._send_reply(
+                    bridge, data, self._cmd_unified_mode(bridge, data, name, mode)
+                )
+
+        # Remove the processed inbox file.
+        try:
+            filepath.unlink()
+        except OSError:
+            pass
+
+    @staticmethod
+    def _unified_help_text() -> str:
+        return (
+            "Unified Threads — commands:\n"
+            "  /unified create <name>     — create a new unified thread\n"
+            "  /unified status             — list all threads you're in\n"
+            "  /unified join <name>        — join a unified thread\n"
+            "  /unified leave <name>       — leave a unified thread\n"
+            "  /unified members <name>     — list members of a thread\n"
+            "  /unified mode <name> <mode> — set mode (participant | reactive | silent | protokoll)\n"
+            "  /unified help                — this help\n\n"
+            "Members share one agent session across bridges. Reply to a "
+            "thread with the address unified~<name> (multicast to all members)."
+        )
+
+    def _cmd_unified_create(self, bridge: str, data: dict, name: str) -> str:
+        """Create a unified thread with the sender as first member."""
+        if not name:
+            return "Usage: /unified create <name>"
+        if name in self._unified_threads:
+            return f"Unified thread '{name}' already exists."
+        member = self._unified_member_record(bridge, data)
+        self._unified_threads[name] = {
+            "name": name,
+            "created_at": _now_iso(),
+            "created_by": data.get("sender", ""),
+            "members": {self._unified_member_key(bridge, data): member},
+            "aliases": [],
+            "mode": "participant",
+        }
+        self._save_unified_threads()
+        return f"Created unified thread '{name}'. You are the first member. Reply to unified~{name}."
+
+    def _cmd_unified_status(self, bridge: str, data: dict) -> str:
+        """List all unified threads and their members/mode."""
+        if not self._unified_threads:
+            return "No unified threads yet. Create one with /unified create <name>."
+        lines = ["Unified threads:"]
+        for name, thread in self._unified_threads.items():
+            n = len(thread.get("members", {}))
+            lines.append(f"  • {name} — {n} member(s), mode={thread.get('mode', 'participant')}")
+        return "\n".join(lines)
+
+    def _cmd_unified_members(self, bridge: str, data: dict, name: str) -> str:
+        """List the members of a unified thread."""
+        thread = self._unified_threads.get(name)
+        if not thread:
+            return f"Unified thread '{name}' not found."
+        members = thread.get("members", {})
+        if not members:
+            return f"Unified thread '{name}' has no members."
+        lines = [f"Members of '{name}':"]
+        for m in members.values():
+            lines.append(f"  • {m['user_name']} ({m['user_id']}) — {m['bridge']}~{m['chat_id']}")
+        return "\n".join(lines)
+
+    def _cmd_unified_join(self, bridge: str, data: dict, name: str) -> str:
+        """Add the sender as a member of a unified thread."""
+        thread = self._unified_threads.get(name)
+        if not thread:
+            return f"Unified thread '{name}' not found."
+        key = self._unified_member_key(bridge, data)
+        if key in thread["members"]:
+            return f"You are already a member of '{name}'."
+        thread["members"][key] = self._unified_member_record(bridge, data)
+        self._save_unified_threads()
+        return f"Joined unified thread '{name}'. Reply to unified~{name}."
+
+    def _cmd_unified_leave(self, bridge: str, data: dict, name: str) -> str:
+        """Remove the sender from a unified thread."""
+        thread = self._unified_threads.get(name)
+        if not thread:
+            return f"Unified thread '{name}' not found."
+        key = self._unified_member_key(bridge, data)
+        if key not in thread.get("members", {}):
+            return f"You are not a member of '{name}'."
+        del thread["members"][key]
+        self._save_unified_threads()
+        return f"Left unified thread '{name}'."
+
+    def _cmd_unified_mode(self, bridge: str, data: dict, name: str, mode: str) -> str:
+        """Set the mode of a unified thread (T-059 implements the logic)."""
+        thread = self._unified_threads.get(name)
+        if not thread:
+            return f"Unified thread '{name}' not found."
+        if mode not in self.UNIFIED_MODES:
+            return f"Invalid mode '{mode}'. Valid: {', '.join(self.UNIFIED_MODES)}."
+        thread["mode"] = mode
+        self._save_unified_threads()
+        return f"Mode of '{name}' set to '{mode}'."
+
     # ── Polling ─────────────────────────────────────────────────────
 
     async def _poll_loop(self) -> None:
@@ -540,6 +750,12 @@ class BridgeAdapter(BasePlatformAdapter):
             logger.warning("Inbox message missing 'sender', skipping %s", filepath)
             return
 
+        # /unified commands (T-058): treat as adapter command, not a normal
+        # message. Parsed and dispatched here so they never reach the agent.
+        if text.strip().startswith("/unified"):
+            await self._handle_unified_command(bridge, data, filepath)
+            return
+
         # User authorization is handled by the Gateway framework
         # (authz_mixin._is_user_authorized), which reads BRIDGE_ALLOWED_USERS
         # via the plugin registry and default-denies. The adapter must NOT
@@ -552,25 +768,48 @@ class BridgeAdapter(BasePlatformAdapter):
         # session reply back to the bridge. The raw identity stays as the
         # chat_name for display.
         thread_id = data.get("thread_id") or data.get("thread_root")
-        routable_chat_id = f"{bridge}~{chat_id}"
-        source = SessionSource(
-            platform=Platform("bridge-adapter"),
-            chat_id=routable_chat_id,
-            chat_name=chat_name or chat_id,
-            chat_type=chat_type,
-            user_id=sender,
-            user_name=data.get("sender_name") or sender,
-            thread_id=thread_id,
-        )
 
-        # Append a compact routing context line so the agent knows exactly
-        # which bridge this message came from and where to reply. This is
-        # stable for the duration of the message (no prompt-cache invalidation),
-        # and lets the agent address replies as <bridge>~<target> without
-        # digging into raw_message. (Bridge-target separator is ``~`` — T-056.)
-        routing_ctx = f"Message from {sender}, bridge {bridge}, reply to {routable_chat_id}"
-        if data.get("reply_to"):
-            routing_ctx += f" (reply_to {data.get('reply_to')})"
+        # Unified thread mapping (T-058): if {bridge}:{chat_id} is a member of
+        # a unified thread, map the session onto the shared virtual thread so
+        # all members share one agent session (chat_type="thread",
+        # chat_id="unified", thread_id=<name>). Replies go to unified~<name>.
+        unified_name = self._find_unified_for_member(bridge, chat_id)
+        if unified_name:
+            n_members = len(self._unified_threads[unified_name].get("members", {}))
+            source = SessionSource(
+                platform=Platform("bridge-adapter"),
+                chat_id="unified",
+                chat_name=unified_name,
+                chat_type="thread",
+                user_id=sender,
+                user_name=data.get("sender_name") or sender,
+                thread_id=unified_name,
+            )
+            routing_ctx = (
+                f"Message from {sender}, bridge {bridge}, "
+                f"unified thread '{unified_name}' ({n_members} members), "
+                f"reply to unified~{unified_name}"
+            )
+        else:
+            routable_chat_id = f"{bridge}~{chat_id}"
+            source = SessionSource(
+                platform=Platform("bridge-adapter"),
+                chat_id=routable_chat_id,
+                chat_name=chat_name or chat_id,
+                chat_type=chat_type,
+                user_id=sender,
+                user_name=data.get("sender_name") or sender,
+                thread_id=thread_id,
+            )
+
+            # Append a compact routing context line so the agent knows exactly
+            # which bridge this message came from and where to reply. This is
+            # stable for the duration of the message (no prompt-cache invalidation),
+            # and lets the agent address replies as <bridge>~<target> without
+            # digging into raw_message. (Bridge-target separator is ``~`` — T-056.)
+            routing_ctx = f"Message from {sender}, bridge {bridge}, reply to {routable_chat_id}"
+            if data.get("reply_to"):
+                routing_ctx += f" (reply_to {data.get('reply_to')})"
         effective_text = f"{text}\n\n[{routing_ctx}]" if text else f"[{routing_ctx}]"
 
         # Determine message type
@@ -681,11 +920,55 @@ class BridgeAdapter(BasePlatformAdapter):
         ``SendResult(success=False, error=...)`` is returned with a clear
         message so the caller (agent) can correct the addressing instead of
         silently dropping or misrouting the message.
+
+        Unified threads (T-058): a target of the form ``unified~<name>`` is
+        special-cased *before* bridge resolution — the message is multicast
+        to every member's own routable address (one outbox JSON per member
+        bridge), so a single agent reply reaches all bridges sharing the
+        thread.
         """
         if isinstance(content, list):
             text = " ".join(str(c) for c in content if c)
         else:
             text = str(content)
+
+        # Unified multicast (T-058): must run before _resolve_bridge_or_none,
+        # since "unified" is not a registered bridge prefix and would
+        # otherwise trigger the T-053 routing fallback.
+        if chat_id.startswith("unified~"):
+            name = chat_id.split("~", 1)[1]
+            thread = self._unified_threads.get(name)
+            if not thread:
+                return SendResult(
+                    success=False,
+                    message_id="",
+                    error=f"Unified thread '{name}' not found",
+                    error_kind="routing",
+                )
+            members = thread.get("members", {})
+            if not members:
+                return SendResult(
+                    success=False,
+                    message_id="",
+                    error=f"Unified thread '{name}' has no members",
+                    error_kind="routing",
+                )
+            results = []
+            for member in members.values():
+                mb = member.get("bridge")
+                mc = member.get("chat_id")
+                if not mb or not mc:
+                    continue
+                r = await self._write_outbox(
+                    mb, f"{mb}~{mc}", text=text, reply_to=reply_to,
+                )
+                results.append(r)
+            ok = bool(results) and all(r.success for r in results)
+            return SendResult(
+                success=ok,
+                message_id=",".join(r.message_id for r in results if r.message_id),
+                error="" if ok else "one or more member sends failed",
+            )
 
         bridge = self._resolve_bridge_or_none(chat_id)
         if bridge is None:
