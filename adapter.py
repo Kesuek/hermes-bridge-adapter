@@ -305,6 +305,12 @@ class BridgeAdapter(BasePlatformAdapter):
         # appearing on two bridges is treated as one member.
         self._identity_map: dict[str, list] = {}
 
+        # Active thread per canonical person (T-064): {person → thread_name}.
+        # Set by ``/unified switch <name>``; the inbound mapper falls back
+        # to it so a user's messages route to their active thread even when
+        # ``_find_unified_for_member`` finds no membership match.
+        self._active_threads: dict[str, str] = {}
+
     # ── Lifecycle ────────────────────────────────────────────────────
 
     async def connect(self, **kwargs) -> bool:
@@ -339,6 +345,10 @@ class BridgeAdapter(BasePlatformAdapter):
         # Load the identity map (T-062) so member dedup works across
         # restarts.
         self._load_identity_map()
+
+        # Load the active_thread map (T-064) so /unified switch persists
+        # across restarts.
+        self._load_active_threads()
 
         # Whether or not any bridges are registered yet, the adapter boots
         # and the registry loop keeps watching for manifests to appear at
@@ -656,6 +666,36 @@ class BridgeAdapter(BasePlatformAdapter):
                     if addr.get("bridge") == bridge and addr.get("chat_id") == chat_id:
                         return name
         return None
+
+    # ── Active thread (T-064) ──────────────────────────────────────────────
+
+    def _active_threads_path(self) -> Path:
+        """Path to the ``active_threads.json`` persistence file."""
+        return self._bridge_dir / "active_threads.json" if self._bridge_dir else Path()
+
+    def _load_active_threads(self) -> None:
+        """Load the active_thread map from ``active_threads.json`` (best-effort).
+
+        Missing or unreadable files reset ``_active_threads`` to an empty
+        dict so the adapter keeps running instead of crashing on a bad file.
+        """
+        self._active_threads = {}
+        p = self._active_threads_path()
+        if not p or not p.exists():
+            return
+        try:
+            data = json.loads(p.read_text("utf-8"))
+            if isinstance(data, dict):
+                self._active_threads = data
+        except (json.JSONDecodeError, OSError) as e:
+            logger.warning("Bad active_threads.json: %s", e)
+
+    def _save_active_threads(self) -> None:
+        """Persist the active_thread map to ``active_threads.json`` (atomic write)."""
+        p = self._active_threads_path()
+        if not p:
+            return
+        self._atomic_write_json(p, self._active_threads)
 
     @staticmethod
     def _unified_member_key(bridge: str, data: dict) -> str:

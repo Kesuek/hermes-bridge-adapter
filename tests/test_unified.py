@@ -1116,3 +1116,16 @@ def test_silent_flush_timer_dispatches_due_digest(tmp_path):
     assert "do not reply" in event.text
     # Buffer is cleared.
     assert a._unified_threads["projekt"]["_adaptive"]["buffer"] == []
+
+
+# ── T-064: active_thread persistence + switch + send ─────────────────
+
+
+def test_active_thread_persist_roundtrip(tmp_path):
+    """T-064 Task 1: active_thread map survives save→load roundtrip."""
+    a = _make_adapter(tmp_path)
+    a._active_threads = {"ronny": "projekt"}
+    a._save_active_threads()
+    a._active_threads = {}
+    a._load_active_threads()
+    assert a._active_threads["ronny"] == "projekt"
