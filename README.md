@@ -153,7 +153,6 @@ capabilities: [text]
 - **Per-bridge config** — mention patterns, user allowlists, poll intervals
 - **Auto-cleanup** — old media files and stale outbox entries are purged
 - **Health monitoring** — status files polled every 60s, logged on disconnect
-- **Multiple gateways** — works with parallel Hermes Gateway instances
 - **Registry self-registration (T-050)** — bridges register via `registry/` manifests, picked up at runtime without a restart
 - **Agent awareness (T-051)** — a system-prompt platform hint teaches the agent to read `registry/` and address messages as `<bridge>~<target>`; every inbound message carries a compact routing line (`[Message from <sender>, bridge <bridge>, reply to <bridge>~<target>]`)
 - **Routing fallback (T-053)** — `send()` validates the target; unroutable targets (unknown bridge / wrong format) return a clear `SendResult` error instead of silently misrouting
