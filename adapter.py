@@ -294,6 +294,11 @@ class BridgeAdapter(BasePlatformAdapter):
         # Unified threads (T-058): {name → thread dict} loaded from disk.
         self._unified_threads: dict[str, dict] = {}
 
+        # Reply map (T-060): gateway_msg_id → {bridge, local_msg_id}.
+        # Lets reply chains resolve across bridges (the gateway msg id is
+        # bridge-agnostic, the local id is bridge-specific).
+        self._reply_map: dict[str, dict] = {}
+
     # ── Lifecycle ────────────────────────────────────────────────────
 
     async def connect(self, **kwargs) -> bool:
@@ -320,6 +325,10 @@ class BridgeAdapter(BasePlatformAdapter):
         # Load persisted unified threads (T-058) so the inbound mapper and
         # multicast sender see the same view across restarts.
         self._load_unified_threads()
+
+        # Load the reply map (T-060) so cross-bridge reply chains resolve
+        # across restarts.
+        self._load_reply_map()
 
         # Whether or not any bridges are registered yet, the adapter boots
         # and the registry loop keeps watching for manifests to appear at
@@ -484,6 +493,42 @@ class BridgeAdapter(BasePlatformAdapter):
             )
         except OSError as e:
             logger.error("Failed to save unified_threads.json: %s", e)
+
+    # ── Reply map (T-060) ────────────────────────────────────────────────
+
+    def _reply_map_path(self) -> Path:
+        """Path to the ``reply_map.json`` persistence file."""
+        return self._bridge_dir / "reply_map.json" if self._bridge_dir else Path()
+
+    def _load_reply_map(self) -> None:
+        """Load the gateway→local reply map from ``reply_map.json`` (best-effort).
+
+        Missing or unreadable files reset ``_reply_map`` to an empty dict
+        so the adapter keeps running instead of crashing on a bad file.
+        """
+        self._reply_map = {}
+        p = self._reply_map_path()
+        if not p or not p.exists():
+            return
+        try:
+            data = json.loads(p.read_text("utf-8"))
+            if isinstance(data, dict):
+                self._reply_map = data
+        except (json.JSONDecodeError, OSError) as e:
+            logger.warning("Bad reply_map.json: %s", e)
+
+    def _save_reply_map(self) -> None:
+        """Persist the reply map to ``reply_map.json``."""
+        p = self._reply_map_path()
+        if not p:
+            return
+        try:
+            p.write_text(
+                json.dumps(self._reply_map, ensure_ascii=False, indent=2),
+                "utf-8",
+            )
+        except OSError as e:
+            logger.error("Failed to save reply_map.json: %s", e)
 
     def _find_unified_for_member(self, bridge: str, chat_id: str) -> Optional[str]:
         """Return the unified thread name ``{bridge}:{chat_id}`` belongs to.

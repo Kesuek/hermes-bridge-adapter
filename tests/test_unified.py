@@ -788,3 +788,15 @@ def test_protokoll_command_help_lists_lifecycle(tmp_path):
     assert "protokoll" in text.lower()
     assert "open" in text
     assert "close" in text
+
+
+# ── T-060: Reply-To-Ketten über Bridges ────────────────────────────────
+
+
+def test_reply_map_persist_roundtrip(tmp_path):
+    a = _make_adapter(tmp_path)
+    a._reply_map = {"gw_1": {"bridge": "imsg", "local_msg_id": "msg_abc"}}
+    a._save_reply_map()
+    a._reply_map = {}
+    a._load_reply_map()
+    assert a._reply_map["gw_1"]["local_msg_id"] == "msg_abc"
