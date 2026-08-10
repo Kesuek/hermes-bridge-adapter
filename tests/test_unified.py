@@ -1200,3 +1200,20 @@ def test_pending_claims_persist_roundtrip(tmp_path):
     a._pending_claims = {}
     a._load_pending_claims()
     assert a._pending_claims["abc123"]["code"] == "123456"
+
+
+def test_identity_claim_sends_code(tmp_path):
+    """T-065 Task 2: /unified identity claim sends a code to the target bridge."""
+    a = _make_adapter(tmp_path)
+    a._bridges = ["imsg", "talk"]
+    a._load_unified_threads()
+    a._load_pending_claims()
+    result = asyncio.run(a._cmd_unified_identity_claim("imsg", {"sender": "ronny.pietschke@icloud.com"}, "talk~ronny"))
+    assert "code" in result.lower() or "sent" in result.lower()
+    # Code wurde an talk-Outbox gesendet
+    talk_files = list((a._bridge_dir / "outbox" / "talk").glob("*.json"))
+    assert talk_files, "claim should send a code to the target bridge"
+    data = json.loads(talk_files[0].read_text("utf-8"))
+    assert "code" in data["text"].lower()
+    # pending claim existiert
+    assert a._pending_claims, "claim should create a pending entry"

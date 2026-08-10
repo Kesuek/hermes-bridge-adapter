@@ -23,6 +23,7 @@ import asyncio
 import json
 import logging
 import os
+import random
 import re
 import shutil
 import time
@@ -832,11 +833,44 @@ class BridgeAdapter(BasePlatformAdapter):
             "mode": self._cmd_unified_mode,
             "switch": self._cmd_unified_switch,
             "send": self._cmd_unified_send,
+            "identity": None,
             "protokoll": None,
         }
         handler = dispatch.get(sub)
         if sub == "help":
             await self._send_reply(bridge, data, self._unified_help_text())
+        elif sub == "identity":
+            # /unified identity claim <bridge>~<target>
+            # /unified identity confirm <code>
+            action = args[0] if args else ""
+            if action == "claim":
+                target = args[1] if len(args) > 1 else ""
+                if not target:
+                    await self._send_reply(
+                        bridge, data,
+                        "Usage: /unified identity claim <bridge>~<target>",
+                    )
+                else:
+                    await self._send_reply(
+                        bridge, data,
+                        await self._cmd_unified_identity_claim(bridge, data, target),
+                    )
+            elif action == "confirm":
+                code = args[1] if len(args) > 1 else ""
+                if not code:
+                    await self._send_reply(
+                        bridge, data, "Usage: /unified identity confirm <code>"
+                    )
+                else:
+                    await self._send_reply(
+                        bridge, data,
+                        self._cmd_unified_identity_confirm(bridge, data, code),
+                    )
+            else:
+                await self._send_reply(
+                    bridge, data,
+                    "Usage: /unified identity <claim|confirm> ...",
+                )
         elif sub == "protokoll":
             # /unified protokoll open <thread> [sitzung]
             # /unified protokoll close <thread>
@@ -1109,6 +1143,41 @@ class BridgeAdapter(BasePlatformAdapter):
         if result.success:
             return f"Sent to unified thread '{name}'."
         return f"Send failed: {result.error}"
+
+    # ── Identity claim (T-065) ─────────────────────────────────────────────
+
+    async def _cmd_unified_identity_claim(
+        self, bridge: str, data: dict, target: str
+    ) -> str:
+        """Claim that the sender is also the target identity (T-065).
+
+        Sends a 6-digit code to the target bridge. The claim is only activated
+        when the target confirms the code (``/unified identity confirm <code>``),
+        proving control of both accounts (challenge-response). The pending
+        claim is persisted to ``pending_claims.json`` so it survives a restart.
+        """
+        if "~" not in target:
+            return "Usage: /unified identity claim <bridge>~<target>"
+        target_bridge, _, target_id = target.partition("~")
+        if target_bridge not in self._bridges:
+            return (
+                f"Unknown bridge '{target_bridge}'. "
+                f"Registered: {', '.join(self._bridges) or '(none)'}"
+            )
+        source = f"{bridge}:{data.get('sender', '')}"
+        code = f"{random.randint(0, 999999):06d}"
+        claim_id = str(uuid.uuid4())[:8]
+        self._pending_claims[claim_id] = {
+            "code": code,
+            "source": source,
+            "target": target,
+            "expires": time.time() + 300,  # 5 min
+        }
+        self._save_pending_claims()
+        # Send the code to the target bridge so only someone who reads that
+        # bridge can confirm (challenge-response).
+        await self._write_outbox(target_bridge, target, text=f"Identity claim code: {code}")
+        return f"Claim sent. Confirm with /unified identity confirm {code} from {target_bridge}."
 
     # ── Adaptive state machine (T-061) ──────────────────────────────────
 
