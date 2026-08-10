@@ -1304,6 +1304,16 @@ class BridgeAdapter(BasePlatformAdapter):
         # triggers the multicast branch in send(). All members map to the
         # same "unified~<name>", so the shared session is preserved.
         unified_name = self._find_unified_for_member(bridge, chat_id)
+        if not unified_name:
+            # T-064: if the user has an active thread, map onto it. This
+            # covers the case where the user is a member via a different
+            # bridge/address (or joined then switched) — the membership
+            # lookup above misses, but the user's explicit "switch" tells
+            # us where they want their messages to go.
+            person = self._resolve_identity(bridge, sender)
+            active = self._active_threads.get(person)
+            if active and active in self._unified_threads:
+                unified_name = active
         if unified_name:
             thread = self._unified_threads[unified_name]
             n_members = len(thread.get("members", {}))

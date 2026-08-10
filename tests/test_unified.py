@@ -1143,3 +1143,32 @@ def test_unified_switch_sets_active_thread(tmp_path):
     a._cmd_unified_create("imsg", {"sender": "ronny", "chat": {"id": "u1"}}, "projekt")
     a._cmd_unified_switch("imsg", {"sender": "ronny"}, "projekt")
     assert a._active_threads["ronny"] == "projekt"
+
+
+def test_inbound_maps_to_active_thread(tmp_path):
+    """T-064 Task 3: a user with an active thread routes to it even when
+    ``_find_unified_for_member`` finds no membership match for the source
+    chat_id (the user is a member via a different bridge/address)."""
+    a = _make_adapter(tmp_path)
+    a._extra["allow_all"] = "true"
+    a._load_unified_threads()
+    a._load_active_threads()
+    # ronny creates + joins from imsg:u1 — member key is imsg:u1.
+    a._cmd_unified_create("imsg", {"sender": "ronny", "chat": {"id": "u1"}}, "projekt")
+    # ronny switches active thread to projekt (allowed — member via imsg:u1).
+    a._cmd_unified_switch("imsg", {"sender": "ronny"}, "projekt")
+    a.handle_message = AsyncMock()
+
+    # Now ronny sends from talk:t1 — NOT a member of projekt via that
+    # address, so _find_unified_for_member returns None. The active_thread
+    # fallback (T-064) must still route the message to unified~projekt.
+    async def run():
+        await a._process_incoming("talk", {
+            "sender": "ronny", "text": "Hallo",
+            "chat": {"id": "t1", "type": "direct"},
+        }, tmp_path / "x.json")
+
+    asyncio.run(run())
+    event = a.handle_message.await_args[0][0]
+    assert event.source.chat_id == "unified~projekt"
+    assert event.source.thread_id == "projekt"
