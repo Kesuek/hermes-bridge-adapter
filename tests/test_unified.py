@@ -1051,7 +1051,11 @@ def test_inbound_relays_to_other_members(tmp_path):
     talk_files = list((a._bridge_dir / "outbox" / "talk").glob("*.json"))
     assert talk_files, "relay should write to talk outbox"
     data = json.loads(talk_files[0].read_text("utf-8"))
-    assert "[Ronny]" in data["text"]
+    # T-066: the relay uses the unified handle, not the wrapper-supplied
+    # sender_name. With no username set the fallback is the raw user_id,
+    # so the relay reads "[ronny]" (the unified identity), not "[Ronny]"
+    # (the raw bridge identity the wrapper happened to supply).
+    assert "[ronny]" in data["text"]
 
 
 def test_relay_dedup_same_person_two_bridges(tmp_path):
