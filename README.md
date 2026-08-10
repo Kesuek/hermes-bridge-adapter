@@ -26,6 +26,7 @@ Instead of each messaging platform connecting directly to the Gateway, the Bridg
 ```
 <bridge_dir>/
 ├── registry/<bridge>.yaml ← bridge manifest (presence = registered)
+├── unified_threads.json   ← persisted unified threads (T-058)
 ├── inbox/<bridge>/       ← written by external service wrapper, read by adapter
 ├── outbox/<bridge>/      ← written by adapter, read by external service wrapper
 ├── status/<bridge>/      ← written by external service wrapper, read by adapter
@@ -149,6 +150,70 @@ capabilities: [text]
 - **Registry self-registration (T-050)** — bridges register via `registry/` manifests, picked up at runtime without a restart
 - **Agent awareness (T-051)** — a system-prompt platform hint teaches the agent to read `registry/` and address messages as `<bridge>~<target>`; every inbound message carries a compact routing line (`[Message from <sender>, bridge <bridge>, reply to <bridge>~<target>]`)
 - **Routing fallback (T-053)** — `send()` validates the target; unroutable targets (unknown bridge / wrong format) return a clear `SendResult` error instead of silently misrouting
+- **Unified threads (T-058)** — `/unified` commands create shared agent sessions across bridges; `unified~<name>` multicasts a reply to every member bridge
+
+## Unified Threads (T-058)
+
+A **Unified Thread** lets several bridges (imsg, Talk, …) share a single agent session. Every member of a unified thread is mapped onto the same virtual thread — `chat_type="thread"`, `chat_id="unified"`, `thread_id=<name>` — so the gateway builds one shared session key and all members talk to the same agent context. The agent's reply is **multicast** to every member bridge.
+
+### `/unified` commands
+
+A message starting with `/unified` is parsed by the adapter as a command (it never reaches the agent). Commands are sent from any member bridge's `inbox/` like a normal message:
+
+| Command | Description |
+|---------|-------------|
+| `/unified create <name>` | Create a new unified thread; the sender becomes the first member |
+| `/unified status` | List all unified threads + member count + mode |
+| `/unified join <name>` | Join an existing unified thread |
+| `/unified leave <name>` | Leave a unified thread |
+| `/unified members <name>` | List the members of a thread |
+| `/unified mode <name> <mode>` | Set the thread's mode (`participant` / `reactive` / `silent` / `protokoll`; the mode *logic* is implemented in T-059, T-058 only stores the field) |
+| `/unified help` | Show the command list |
+
+### Addressing a unified thread
+
+A member of a unified thread gets mapped onto the virtual thread automatically — their normal messages route to the shared session. The agent (or any cron job) replies with the special target:
+
+```
+unified~<name>
+```
+
+`send()` special-cases the `unified~` prefix **before** bridge resolution (`unified` is not a registered bridge prefix) and writes one outbox JSON per member to that member's own `outbox/<bridge>/`:
+
+```
+outbox/imsg/<uuid>.json   → target = imsg~<chat_id>
+outbox/talk/<uuid>.json   → target = talk~<chat_id>
+```
+
+Each wrapper then delivers its copy via its own platform API, so one agent reply reaches every bridge in the thread.
+
+### Persistence
+
+Unified threads are persisted in `<bridge_dir>/unified_threads.json`:
+
+```json
+{
+  "projekt": {
+    "name": "projekt",
+    "created_at": "2026-08-10T10:00:00+02:00",
+    "created_by": "ronny",
+    "members": {
+      "imsg:u1": {"bridge": "imsg", "chat_id": "u1", "user_id": "ronny", "user_name": "ronny", "joined_at": "..."},
+      "talk:t1": {"bridge": "talk", "chat_id": "t1", "user_id": "anja", "user_name": "anja", "joined_at": "..."}
+    },
+    "aliases": [],
+    "mode": "participant"
+  }
+}
+```
+
+Members are keyed by `{bridge}:{chat_id}`. The file is loaded on `connect()` and rewritten on every mutating command, so threads survive a gateway restart.
+
+### Notes / limits
+
+- **Auth stays framework-side.** A user not authorized on a bridge is dropped by the gateway's authz mixin before the adapter's mapping sees them — they cannot join a thread.
+- **Member dedup (T-062)** is a separate task — T-058 uses raw `{bridge}:{chat_id}` keys.
+- **Mode logic (T-059)** is a separate task — T-058 only stores the `mode` field and validates it against the four allowed values.
 
 ## Installation
 

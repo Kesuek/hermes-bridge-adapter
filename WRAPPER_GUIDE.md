@@ -405,6 +405,58 @@ def write_reaction(message_id, user_id, reaction, chat_id):
     path.write_text(json.dumps(msg, ensure_ascii=False, indent=2), "utf-8")
 ```
 
+## Unified Threads (T-058)
+
+A **Unified Thread** lets members on different bridges share one agent session. The adapter maps every member onto the same virtual thread (`chat_id="unified"`, `thread_id=<name>`), and a reply to `unified~<name>` is multicast to each member's own `outbox/<bridge>/`.
+
+### Sending `/unified` commands
+
+A `/unified` command is just an inbox JSON message whose `text` starts with `/unified`. The adapter intercepts it (it never reaches the agent) and writes the reply back to the sender's `outbox/<bridge>/`:
+
+```python
+def write_unified_command(sender, chat_id, command_text):
+    write_inbox(
+        sender=sender,
+        text=command_text,            # e.g. "/unified create projekt"
+        chat_id=chat_id,
+        chat_type="direct",
+    )
+```
+
+Available commands: `create <name>`, `status`, `join <name>`, `leave <name>`, `members <name>`, `mode <name> <mode>`, `help`.
+
+### Delivering multicast replies
+
+When the agent replies to `unified~projekt`, the adapter writes one outbox JSON **per member** to that member's own `outbox/<bridge>/`. Each wrapper only sees its own copy, addressed to its own chat:
+
+```json
+// outbox/imsg/<uuid>.json
+{
+  "id": "out_abc123",
+  "bridge": "imsg",
+  "target": "imsg~u1",
+  "text": "Hallo alle",
+  ...
+}
+```
+
+```json
+// outbox/talk/<uuid>.json
+{
+  "id": "out_def456",
+  "bridge": "talk",
+  "target": "talk~t1",
+  "text": "Hallo alle",
+  ...
+}
+```
+
+So a wrapper delivering multicast replies needs **no special logic** — it keeps polling its own `outbox/<bridge>/` and delivering whatever appears there; the adapter handles the fan-out.
+
+### Persistence
+
+Threads are persisted in `<bridge_dir>/unified_threads.json` (loaded on adapter start, rewritten on every mutating command). Members are keyed by `{bridge}:{chat_id}`. The wrapper does not need to read this file — it's purely adapter state.
+
 ## Configuration via Environment Variables
 
 All configuration should be done through environment variables so the wrapper works without hardcoded values:
