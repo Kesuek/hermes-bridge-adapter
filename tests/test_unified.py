@@ -1007,3 +1007,22 @@ def test_identity_map_with_wrapper(tmp_path):
     assert a._resolve_identity("imsg", "anja") == "anja"
     # legacy 1-arg form still works
     assert a._resolve_identity("ronny") == "ronny"
+
+
+def test_relay_to_other_members(tmp_path):
+    """T-063 Task 2: relay writes to the outbox of the other member bridges."""
+    a = _make_adapter(tmp_path)
+    a._load_unified_threads()
+    a._cmd_unified_create("imsg", {"sender": "ronny", "chat": {"id": "u1"}}, "projekt")
+    a._cmd_unified_join("talk", {"sender": "anja", "chat": {"id": "t1"}}, "projekt")
+    # Nachricht von imsg → relay an talk (nicht an imsg)
+    asyncio.run(a._relay_to_other_members("projekt", "imsg", "Ronny", "Hallo alle"))
+    # talk-Outbox hat die Relay-Kopie
+    talk_files = list((a._bridge_dir / "outbox" / "talk").glob("*.json"))
+    assert talk_files, "relay should write to talk outbox"
+    data = json.loads(talk_files[0].read_text("utf-8"))
+    assert "[Ronny]" in data["text"]
+    assert "Hallo alle" in data["text"]
+    # imsg-Outbox ist leer (nicht an Ursprungs-Bridge)
+    imsg_files = list((a._bridge_dir / "outbox" / "imsg").glob("*.json"))
+    assert not imsg_files, "relay must not write back to source bridge"

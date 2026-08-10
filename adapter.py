@@ -675,10 +675,47 @@ class BridgeAdapter(BasePlatformAdapter):
             "chat_id": chat_id,
             "user_id": user_id,
             "user_name": data.get("sender_name") or user_id,
-            "person": self._resolve_identity(user_id),
+            "person": self._resolve_identity(bridge, user_id),
             "joined_at": _now_iso(),
             "addresses": [{"bridge": bridge, "chat_id": chat_id, "user_id": user_id}],
         }
+
+    async def _relay_to_other_members(
+        self, unified_name: str, source_bridge: str, sender_name: str, text: str
+    ) -> None:
+        """Mirror an inbound unified-thread message to the OTHER member bridges.
+
+        Every member bridge except the source gets a copy prefixed with the
+        sender name (``[Name] text``), so all participants see the full
+        conversation across messenger boundaries. The original message is
+        still dispatched to the agent (it stays in context); this relay is
+        for the humans.
+
+        Loop-safe: the relay copy goes only to the outbox (the wrapper sends
+        it over the platform API); it never re-enters the inbox, so it can't
+        be re-dispatched as an inbound message. Targets are deduped by
+        ``(bridge, chat_id)`` — the same address is never written twice.
+        """
+        thread = self._unified_threads.get(unified_name)
+        if not thread:
+            return
+        members = thread.get("members", {})
+        # Collect the target addresses: every member bridge except the
+        # source. Each member contributes its primary (bridge, chat_id) plus
+        # any additional addresses it merged in (T-062).
+        targets: set[tuple[str, str]] = set()
+        for m in members.values():
+            addrs = [(m.get("bridge"), m.get("chat_id"))]
+            for addr in m.get("addresses", []):
+                addrs.append((addr.get("bridge"), addr.get("chat_id")))
+            for mb, mc in addrs:
+                if mb and mc and mb != source_bridge:
+                    targets.add((mb, mc))
+        if not targets:
+            return
+        relay_text = f"[{sender_name}] {text}"
+        for mb, mc in targets:
+            await self._write_outbox(mb, f"{mb}~{mc}", text=relay_text)
 
     async def _send_reply(self, bridge: str, data: dict, message: str) -> None:
         """Write an outbox reply to the sender of a ``/unified`` command.
@@ -872,7 +909,7 @@ class BridgeAdapter(BasePlatformAdapter):
         if key in members:
             return f"You are already a member of '{name}'."
         # T-062 dedup: same person from a second bridge → merge.
-        person = self._resolve_identity(data.get("sender", ""))
+        person = self._resolve_identity(bridge, data.get("sender", ""))
         for m in members.values():
             if m.get("person") == person:
                 addr = {
