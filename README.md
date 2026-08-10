@@ -27,6 +27,9 @@ Instead of each messaging platform connecting directly to the Gateway, the Bridg
 <bridge_dir>/
 ├── registry/<bridge>.yaml ← bridge manifest (presence = registered)
 ├── unified_threads.json   ← persisted unified threads (T-058)
+├── reply_map.json        ← gateway→local message-id map for cross-bridge reply chains (T-060)
+├── identity_map.json     ← alias→person map for member dedup (T-062)
+├── protokoll/<thread>/   ← rendered protokoll artifacts (T-059)
 ├── inbox/<bridge>/       ← written by external service wrapper, read by adapter
 ├── outbox/<bridge>/      ← written by adapter, read by external service wrapper
 ├── status/<bridge>/      ← written by external service wrapper, read by adapter
@@ -152,6 +155,9 @@ capabilities: [text]
 - **Routing fallback (T-053)** — `send()` validates the target; unroutable targets (unknown bridge / wrong format) return a clear `SendResult` error instead of silently misrouting
 - **Unified threads (T-058)** — `/unified` commands create shared agent sessions across bridges; `unified~<name>` multicasts a reply to every member bridge
 - **Unified thread modes (T-059)** — per-thread `mode` (`participant` / `reactive` / `silent` / `protokoll`) controls dispatch behaviour; leader (`created_by`) marked as `[<Name> Leader]` in the routing context; `protokoll` lifecycle (`open`/`close`) collects messages into a Markdown artifact
+- **Reply-To-Ketten über Bridges (T-060)** — a persisted `gateway_msg_id → {bridge, local_msg_id}` map lets reply chains resolve across bridges; inbound registers the mapping, `send()` resolves a `reply_to` gateway id to the bridge-local id
+- **Adaptive Zustandsmaschine (T-061)** — per-thread `idle → active → digesting` state machine; high message frequency (3 in 30s / 5 in 60s) flips to digest mode and buffers messages; after `digest_interval` (60s) the buffer is flushed as a single bundled `[System: N messages from M users]` turn. State + buffer persist in `unified_threads.json`. Applies only in `participant` mode
+- **Member-Deduplizierung (T-062)** — an `identity_map.json` (`{canonical_person: [alias, ...]}`) collapses the same person on two bridges into one member; the second join merges its `{bridge}:{chat_id}` address into the existing member's `addresses` array instead of adding a duplicate entry
 
 ## Unified Threads (T-058)
 
@@ -234,24 +240,80 @@ Unified threads are persisted in `<bridge_dir>/unified_threads.json`:
     "created_at": "2026-08-10T10:00:00+02:00",
     "created_by": "ronny",
     "members": {
-      "imsg:u1": {"bridge": "imsg", "chat_id": "u1", "user_id": "ronny", "user_name": "ronny", "joined_at": "..."},
-      "talk:t1": {"bridge": "talk", "chat_id": "t1", "user_id": "anja", "user_name": "anja", "joined_at": "..."}
+      "imsg:u1": {
+        "bridge": "imsg", "chat_id": "u1", "user_id": "ronny.pietschke@icloud.com",
+        "user_name": "ronny.pietschke@icloud.com", "person": "ronny",
+        "joined_at": "...",
+        "addresses": [
+          {"bridge": "imsg", "chat_id": "u1", "user_id": "ronny.pietschke@icloud.com"},
+          {"bridge": "talk", "chat_id": "t1", "user_id": "ronny"}
+        ]
+      }
     },
     "aliases": [],
     "mode": "participant",
+    "_adaptive": {"state": "idle", "buffer": [], "last_msg_ts": 0.0, "digest_until": 0.0, "cooldown_until": 0.0},
     "protokoll": null
   }
 }
 ```
 
-Members are keyed by `{bridge}:{chat_id}`. The file is loaded on `connect()` and rewritten on every mutating command, so threads survive a gateway restart. While a protokoll session is open, `protokoll` holds `{name, opened_at, opened_by, messages: [...]}`; after `close` it reverts to `null`.
+Members are keyed by `{bridge}:{chat_id}` (the first address a person joined from). The file is loaded on `connect()` and rewritten on every mutating command, so threads survive a gateway restart. While a protokoll session is open, `protokoll` holds `{name, opened_at, opened_by, messages: [...]}`; after `close` it reverts to `null`. The `_adaptive` block (T-061) tracks the per-thread state-machine state and message buffer.
+
+## Reply-To-Ketten über Bridges (T-060)
+
+A reply chain on a single bridge uses the bridge-local message id (`reply_to`). Across bridges that id is meaningless — the iMessage wrapper doesn't know the Talk message id. The adapter bridges this gap with a persisted map:
+
+```
+<bridge_dir>/reply_map.json
+{ "<gateway_msg_id>": {"bridge": "imsg", "local_msg_id": "msg_abc"}, ... }
+```
+
+- **Inbound** — when a message is dispatched, the adapter records `gateway_msg_id → {bridge, local_msg_id}`. The gateway assigns the `message_id` (the event's `message_id`); the local id is the inbox JSON's `id`/`message_id`. If no gateway id is available, the adapter falls back to a UUID.
+- **Outbound** — `send()` / `send_image()` / `send_document()` (and the `unified~` multicast path) resolve a `reply_to` that matches a gateway id in the map to the stored `local_msg_id`. A bridge-local `reply_to` passes through unchanged.
+
+The file is loaded on `connect()` and rewritten on every inbound registration, so reply chains survive a restart.
+
+## Adaptive Zustandsmaschine (T-061)
+
+Every unified thread carries a per-thread state machine that adapts dispatch behaviour to message frequency:
+
+```
+idle → active → digesting
+```
+
+- **`idle`** — no messages yet (initial state).
+- **`active`** — the thread has seen messages; each message is dispatched as its own turn (the normal `participant` behaviour).
+- **`digesting`** — the thread has seen high frequency (3 messages in 30s, or 5 in 60s, sliding window). Incoming messages are **buffered** instead of dispatched. After `digest_interval` (60s) the buffer is **flushed as a single bundled turn**: one `MessageEvent` whose text is a `[System: N messages from M users]` header followed by one `[HH:MM] [sender] text` line per buffered message. After the flush the state returns to `active` with a short cooldown.
+
+State and buffer persist in `unified_threads.json` (the `_adaptive` block), so a gateway restart doesn't lose the in-flight digest window. Adaptive only applies in **`participant`** mode — the deterministic modes (`reactive`/`silent`/`protokoll`) are unaffected.
+
+The thresholds and intervals are class constants on `BridgeAdapter` (`ADAPTIVE_THRESHOLD_30`, `ADAPTIVE_THRESHOLD_60`, `ADAPTIVE_DIGEST_INTERVAL`, `ADAPTIVE_COOLDOWN`).
+
+## Member-Deduplizierung (T-062)
+
+The same person may appear on two bridges under different aliases — `ronny.pietschke@icloud.com` on iMessage and `ronny` on Talk — but they are one person and should be one member of a unified thread. The adapter collapses aliases via a persisted identity map:
+
+```
+<bridge_dir>/identity_map.json
+{ "ronny": ["ronny.pietschke@icloud.com", "+491714824968", "ronny"] }
+```
+
+- **`_resolve_identity(user_id)`** maps a bridge-local user_id to the canonical person (returns the user_id itself if unknown).
+- **Member record** — every member gets a `person` field (the canonical identity) and an `addresses` array of `{bridge, chat_id, user_id}` entries.
+- **Join dedup** — `_cmd_unified_join` checks whether the sender's canonical `person` is already a member. If so, the new `{bridge}:{chat_id}` address is merged into the existing member's `addresses` array instead of creating a duplicate member entry. The primary member key stays the first address the person joined from.
+- **Inbound routing** — `_find_unified_for_member` scans both the top-level `{bridge}:{chat_id}` keys and the merged `addresses` arrays, so a message from any of a person's bridges still maps to the shared thread.
+- **Multicast** — `send("unified~<name>")` multicasts to every member's primary address **and** every merged address (deduped), so a person on two bridges receives the reply on both.
+
+The file is loaded on `connect()`. Unknown aliases pass through unchanged, so the identity map is purely opt-in.
 
 ### Notes / limits
 
 - **Auth stays framework-side.** A user not authorized on a bridge is dropped by the gateway's authz mixin before the adapter's mapping sees them — they cannot join a thread.
-- **Member dedup (T-062)** is a separate task — T-058 uses raw `{bridge}:{chat_id}` keys.
 - **Mention patterns** drive `reactive` mode (and group-chat gating). The default patterns match `@hermes` / `hermes agent`; a bridge can override via `mention_patterns` in its manifest / `BRIDGE_MENTION_PATTERNS`. A message is "mentioned" if any pattern matches it.
 - **`NO_REPLY` marker** is only relevant in `participant` mode — the agent emits the literal token `NO_REPLY` (or `[SILENT]`) and the gateway suppresses delivery. The other three modes drop deterministically in the adapter before the agent is ever called.
+- **Adaptive + modes** — adaptive bundling only applies in `participant` mode; `reactive` drops un-mentioned messages anyway (no digest needed), `silent`/`protokoll` are deterministic.
+- **Identity map is opt-in** — without an `identity_map.json` entry, a sender's `person` equals its raw `user_id`, so two different people with the same id on different bridges would be merged. Add explicit entries to control which aliases belong together.
 
 ## Installation
 

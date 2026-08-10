@@ -486,7 +486,41 @@ The artifact lands at `<bridge_dir>/protokoll/projekt/sitzung-2026-08-10.md`. On
 
 ### Persistence
 
-Threads are persisted in `<bridge_dir>/unified_threads.json` (loaded on adapter start, rewritten on every mutating command). Members are keyed by `{bridge}:{chat_id}`. The wrapper does not need to read this file — it's purely adapter state. While a protokoll session is open the thread record also holds the live `protokoll` state; after `close` it reverts to `null`.
+Threads are persisted in `<bridge_dir>/unified_threads.json` (loaded on adapter start, rewritten on every mutating command). Members are keyed by `{bridge}:{chat_id}` (the first address a person joined from); a merged member also carries an `addresses` array of its other bridge addresses (T-062). The wrapper does not need to read this file — it's purely adapter state. While a protokoll session is open the thread record also holds the live `protokoll` state; after `close` it reverts to `null`. A `_adaptive` block (T-061) tracks the per-thread state-machine state and message buffer.
+
+### Reply-To-Ketten über Bridges (T-060)
+
+The adapter maintains a persisted `gateway_msg_id → {bridge, local_msg_id}` map in `<bridge_dir>/reply_map.json`. The wrapper's role is unchanged: it still writes `reply_to` on inbox messages (its own bridge-local message id) and reads `reply_to` on outbox messages the same way. The adapter handles the cross-bridge translation:
+
+- **Inbox** — the wrapper writes `reply_to: <local_msg_id>` as before. The adapter records the gateway-assigned `message_id` → `local_msg_id` mapping so a reply from a *different* bridge can resolve back to the original bridge's local id.
+- **Outbox** — when the agent replies with a `reply_to` that is a gateway msg id (from a cross-bridge reply chain), the adapter resolves it to the destination bridge's local id before writing the outbox JSON. The wrapper only ever sees bridge-local ids in `reply_to`.
+
+So the wrapper needs **no special logic** — keep writing/reading `reply_to` as the bridge-local id. The adapter transparently bridges the id space across bridges.
+
+### Adaptive Zustandsmaschine (T-061)
+
+In `participant` mode, the adapter watches message frequency per unified thread. When it exceeds a threshold (3 messages in 30s, or 5 in 60s), the thread flips to **digesting** and buffers incoming messages instead of dispatching them one-by-one. After a 60s `digest_interval`, the buffer is flushed as **one** `MessageEvent` whose text is:
+
+```
+[System: 7 messages from 2 users]
+[10:42] [ronny] foo
+[10:42] [anja] bar
+...
+```
+
+From the wrapper's perspective nothing changes: the inbox messages it writes are still consumed as normal; the bundled turn appears in the agent's reply (if any) in `outbox/`. State and buffer persist in `unified_threads.json`, so a gateway restart doesn't lose the in-flight digest window. The wrapper does not need to know whether a thread is digesting.
+
+### Member-Deduplizierung (T-062)
+
+The adapter maintains a persisted identity map in `<bridge_dir>/identity_map.json`:
+
+```json
+{ "ronny": ["ronny.pietschke@icloud.com", "+491714824968", "ronny"] }
+```
+
+When the same person joins a unified thread from a second bridge, the adapter merges the new `{bridge}:{chat_id}` address into the existing member's `addresses` array instead of creating a duplicate member. The wrapper's role is unchanged — it keeps writing `/unified join` from each bridge as normal; the adapter dedups transparently. Multicast replies (`unified~<name>`) are delivered to every member address, including merged ones, so a person on two bridges receives the reply on both.
+
+The identity map is **opt-in**: without an entry, a sender's canonical `person` equals its raw `user_id`, so two unrelated people with the same id on different bridges would be merged. Add explicit entries to declare which aliases belong together.
 
 ## Configuration via Environment Variables
 
