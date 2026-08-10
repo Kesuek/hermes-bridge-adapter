@@ -896,3 +896,16 @@ def test_adaptive_flush_dispatches_bundle(tmp_path):
     a.handle_message.assert_awaited_once()
     event = a.handle_message.await_args[0][0]
     assert "[System:" in event.text  # bundle header
+
+
+# ── T-062: Member-Deduplizierung ──────────────────────────────────────
+
+
+def test_identity_map_resolves_alias(tmp_path):
+    a = _make_adapter(tmp_path)
+    a._identity_map = {
+        "ronny": ["ronny.pietschke@icloud.com", "+491714824968", "ronny"],
+    }
+    assert a._resolve_identity("ronny.pietschke@icloud.com") == "ronny"
+    assert a._resolve_identity("ronny") == "ronny"
+    assert a._resolve_identity("anja") == "anja"  # unknown → itself

@@ -299,6 +299,11 @@ class BridgeAdapter(BasePlatformAdapter):
         # bridge-agnostic, the local id is bridge-specific).
         self._reply_map: dict[str, dict] = {}
 
+        # Identity map (T-062): canonical person → [alias, ...]. Maps a
+        # bridge-local user_id to a canonical identity so the same person
+        # appearing on two bridges is treated as one member.
+        self._identity_map: dict[str, list] = {}
+
     # ── Lifecycle ────────────────────────────────────────────────────
 
     async def connect(self, **kwargs) -> bool:
@@ -329,6 +334,10 @@ class BridgeAdapter(BasePlatformAdapter):
         # Load the reply map (T-060) so cross-bridge reply chains resolve
         # across restarts.
         self._load_reply_map()
+
+        # Load the identity map (T-062) so member dedup works across
+        # restarts.
+        self._load_identity_map()
 
         # Whether or not any bridges are registered yet, the adapter boots
         # and the registry loop keeps watching for manifests to appear at
@@ -541,6 +550,41 @@ class BridgeAdapter(BasePlatformAdapter):
         if reply_to and reply_to in self._reply_map:
             return self._reply_map[reply_to]["local_msg_id"]
         return reply_to
+
+    # ── Identity map (T-062) ─────────────────────────────────────────────
+
+    def _identity_map_path(self) -> Path:
+        """Path to the ``identity_map.json`` persistence file."""
+        return self._bridge_dir / "identity_map.json" if self._bridge_dir else Path()
+
+    def _load_identity_map(self) -> None:
+        """Load the identity map from ``identity_map.json`` (best-effort).
+
+        The map is ``{canonical_person: [alias, ...]}``. Missing or
+        unreadable files reset ``_identity_map`` to an empty dict.
+        """
+        self._identity_map = {}
+        p = self._identity_map_path()
+        if not p or not p.exists():
+            return
+        try:
+            data = json.loads(p.read_text("utf-8"))
+            if isinstance(data, dict):
+                self._identity_map = data
+        except (json.JSONDecodeError, OSError) as e:
+            logger.warning("Bad identity_map.json: %s", e)
+
+    def _resolve_identity(self, user_id: str) -> str:
+        """Map a bridge-local user_id to a canonical person identity (T-062).
+
+        Returns the canonical person if ``user_id`` is a known alias, or
+        ``user_id`` itself if unknown (so unrecognized identities pass
+        through unchanged).
+        """
+        for person, aliases in self._identity_map.items():
+            if user_id in aliases:
+                return person
+        return user_id  # unknown → itself
 
     def _find_unified_for_member(self, bridge: str, chat_id: str) -> Optional[str]:
         """Return the unified thread name ``{bridge}:{chat_id}`` belongs to.
