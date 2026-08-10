@@ -30,6 +30,9 @@ A message starting with `/unified` is parsed by the adapter as a command (it nev
 | `/unified mode <name> <mode>` | Set the mode — `participant` / `reactive` / `off` / `silent` / `protokoll` |
 | `/unified switch <name>` | Set this thread as your **active thread** — your messages route here (T-064) |
 | `/unified send <name> <message>` | One-shot send to a thread (multicast to all members, no switch) (T-064) |
+| `/unified identity claim <bridge>~<target>` | Claim that you are also `<target>` on another bridge — sends a code to the target bridge (T-065) |
+| `/unified identity confirm <code>` | Confirm an identity claim from the **target** bridge (proves you control both accounts) (T-065) |
+| `/unified set username <name>` | Set your display name (per canonical person, shown in `status`) (T-065) |
 | `/unified protokoll open <name> [sitzung]` | Open a protokoll session (leader-only) |
 | `/unified protokoll close <name>` | Close the protokoll session (leader-only) |
 | `/unified help` | Show the command list |
@@ -177,6 +180,21 @@ The same person may appear on two bridges under different aliases — `ronny.pie
 
 The file is loaded on `connect()`. Unknown aliases pass through unchanged, so the identity map is purely opt-in.
 
+## Identity-Claim (Challenge-Response, T-065)
+
+The identity map is hand-editable, but it can also be **authorized programmatically** with a challenge-response flow: a user claims that they are also a second identity on another bridge, and must prove control of both accounts before the merge takes effect.
+
+1. **Claim** — `/unified identity claim <bridge>~<target>` (sent from the source bridge). The adapter generates a 6-digit code, records a pending claim (`{code, source, target, expires}`, 5-minute TTL) in `pending_claims.json`, and writes one outbox JSON to the **target** bridge's `outbox/<target_bridge>/` carrying the code (only someone who reads that bridge sees it).
+2. **Confirm** — `/unified identity confirm <code>` sent **from the target bridge** by the claimed target identity. The adapter checks the code, the TTL, and that the sender matches the claim's `target`. On success it merges the target alias into the source person's `identity_map.json` entry (`aliases` + `wrappers`), persists the map, and clears the pending claim.
+
+This is the root-level spoofing guard: an attacker who compromises only one bridge cannot confirm a claim, because the code was sent to the *other* bridge. The confirm must come from the claimed target.
+
+Pending claims and the identity map are both loaded on `connect()` and rewritten atomically, so an in-flight challenge survives a restart.
+
+## Username (`set username`, T-065)
+
+`/unified set username <name>` sets a display name for the sender's canonical person, persisted in `<bridge_dir>/usernames.json` (`{person → display_name}`, loaded on `connect()`). The `status` command shows it alongside each person's merged addresses.
+
 ## Persistence
 
 Unified threads are persisted in `<bridge_dir>/unified_threads.json`:
@@ -209,6 +227,8 @@ Unified threads are persisted in `<bridge_dir>/unified_threads.json`:
 Members are keyed by `{bridge}:{chat_id}` (the first address a person joined from). The file is loaded on `connect()` and rewritten on every mutating command, so threads survive a gateway restart. While a protokoll session is open, `protokoll` holds `{name, opened_at, opened_by, messages: [...]}`; after `close` it reverts to `null`. The `_adaptive` block (T-061) tracks the per-thread state-machine state and message buffer.
 
 The **active thread** map (T-064) lives in a separate file, `<bridge_dir>/active_threads.json` (`{person → thread_name}`), also loaded on `connect()` and rewritten on every `/unified switch`.
+
+The **pending identity claims** (T-065) live in `<bridge_dir>/pending_claims.json` (`{claim_id → {code, source, target, expires}}`), loaded on `connect()` and rewritten on every `claim`/`confirm`. The **usernames** (T-065) live in `<bridge_dir>/usernames.json` (`{person → display_name}`), loaded on `connect()` and rewritten on every `/unified set username`. The **identity map** is now also written programmatically (`_save_identity_map`, atomic write) when a claim is confirmed — previously it was hand-edit only.
 
 ## Notes / limits
 
