@@ -818,3 +818,25 @@ def test_reply_map_registers_inbound(tmp_path):
     # handle_message was called with a MessageEvent whose message_id is the
     # gateway_msg_id; the map must contain the mapping.
     assert any(v.get("local_msg_id") == "msg_abc" for v in a._reply_map.values())
+
+
+def test_reply_to_resolves_across_bridges(tmp_path):
+    a = _make_adapter(tmp_path)
+    a._load_reply_map()
+    a._reply_map["gw_1"] = {"bridge": "imsg", "local_msg_id": "msg_abc"}
+    a._save_reply_map()
+    # Register the talk bridge so send() can route to talk~room1
+    reg = a._bridge_dir / "registry"
+    reg.mkdir()
+    (reg / "talk.yaml").write_text(
+        "name: talk\ntarget_format: [chat_id]\n", encoding="utf-8"
+    )
+    a._reconcile_registry_sync()
+    # send to a different bridge member with reply_to=gw_1
+    result = asyncio.run(a.send("talk~room1", "Antwort", reply_to="gw_1"))
+    assert result.success
+    # the talk outbox must have reply_to=msg_abc (resolved)
+    files = list((a._bridge_dir / "outbox" / "talk").glob("*.json"))
+    assert files
+    data = json.loads(files[0].read_text("utf-8"))
+    assert data["reply_to"] == "msg_abc"

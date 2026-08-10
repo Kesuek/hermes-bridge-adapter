@@ -530,6 +530,18 @@ class BridgeAdapter(BasePlatformAdapter):
         except OSError as e:
             logger.error("Failed to save reply_map.json: %s", e)
 
+    def _resolve_reply_to(self, reply_to: Optional[str]) -> Optional[str]:
+        """Resolve a gateway_msg_id reply_to to the bridge-local id (T-060).
+
+        If ``reply_to`` is a known gateway_msg_id in the reply map, return
+        the stored ``local_msg_id`` (the bridge-local message id the wrapper
+        understands). Otherwise return ``reply_to`` unchanged so
+        bridge-local reply chains still work transparently.
+        """
+        if reply_to and reply_to in self._reply_map:
+            return self._reply_map[reply_to]["local_msg_id"]
+        return reply_to
+
     def _find_unified_for_member(self, bridge: str, chat_id: str) -> Optional[str]:
         """Return the unified thread name ``{bridge}:{chat_id}`` belongs to.
 
@@ -1226,13 +1238,14 @@ class BridgeAdapter(BasePlatformAdapter):
                     error_kind="routing",
                 )
             results = []
+            resolved_reply_to = self._resolve_reply_to(reply_to)
             for member in members.values():
                 mb = member.get("bridge")
                 mc = member.get("chat_id")
                 if not mb or not mc:
                     continue
                 r = await self._write_outbox(
-                    mb, f"{mb}~{mc}", text=text, reply_to=reply_to,
+                    mb, f"{mb}~{mc}", text=text, reply_to=resolved_reply_to,
                 )
                 results.append(r)
             ok = bool(results) and all(r.success for r in results)
@@ -1276,7 +1289,8 @@ class BridgeAdapter(BasePlatformAdapter):
             )
 
         thread_id = (metadata or {}).get("thread_id")
-        return await self._write_outbox(bridge, chat_id, text=text, reply_to=reply_to, thread_id=thread_id)
+        resolved_reply_to = self._resolve_reply_to(reply_to)
+        return await self._write_outbox(bridge, chat_id, text=text, reply_to=resolved_reply_to, thread_id=thread_id)
 
     async def send_typing(self, chat_id):
         """Write a typing indicator to the outbox."""
@@ -1295,9 +1309,10 @@ class BridgeAdapter(BasePlatformAdapter):
             "path": rel_path,
             "caption": caption or "",
         }
+        resolved_reply_to = self._resolve_reply_to(reply_to)
         return await self._write_outbox(
             bridge, chat_id, text=caption or "", attachments=[attachment],
-            reply_to=reply_to,
+            reply_to=resolved_reply_to,
         )
 
     async def send_document(self, chat_id, path, caption=None, reply_to=None):
@@ -1312,9 +1327,10 @@ class BridgeAdapter(BasePlatformAdapter):
             "path": rel_path,
             "caption": caption or "",
         }
+        resolved_reply_to = self._resolve_reply_to(reply_to)
         return await self._write_outbox(
             bridge, chat_id, text=caption or "", attachments=[attachment],
-            reply_to=reply_to,
+            reply_to=resolved_reply_to,
         )
 
     async def get_chat_info(self, chat_id):
