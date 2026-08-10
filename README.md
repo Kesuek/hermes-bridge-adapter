@@ -159,25 +159,6 @@ capabilities: [text]
 - **Routing fallback (T-053)** — `send()` validates the target; unroutable targets (unknown bridge / wrong format) return a clear `SendResult` error instead of silently misrouting
 - **Unified Threads (T-058–T-068) — the differentiator.** Because every bridge is wired to the adapter through the same JSON-file contract, multiple bridges can share a **single agent session** — one conversation across iMessage, Talk, and any other wrapper. Native gateway adapters are isolated from each other; the Bridge Adapter turns them into one thread. `/unified` commands (with `/u` alias shortcuts), 5 participant modes, cross-bridge reply chains, adaptive bundling, member dedup, **message relay** that mirrors every inbound message to the other member bridges so all humans see the full conversation, plus **active-thread switching**, **one-shot send** (T-064), **identity-claim challenge-response** to authorize a user-mapping across bridges (T-065), **unified handles** (T-066) that decouple the on-thread identity from the raw bridge identity (`unified~<username>`, agent handle from config), and **exit** (T-067/T-068) to pause a member chat back into the normal per-bridge DM. **→ [Full docs: `UNIFIED_THREADS.md`](UNIFIED_THREADS.md)**
 
-## Unified Threads (T-058–T-068)
-
-**The Bridge Adapter's differentiator.** Because every bridge is wired to the adapter through the same JSON-file contract, multiple bridges can share a **single agent session** — one conversation across iMessage, Talk, and any other wrapper. Native gateway adapters are isolated from each other (each platform has its own session); the Bridge Adapter turns them into **one thread across all your messaging worlds**.
-
-This includes:
-- **`/unified` commands** — `create`/`join`/`leave`/`exit`/`members`/`status`/`mode`/`switch`/`send`/`identity`/`set username`/`protokoll`/`help`, plus `/u` alias shortcuts (`/u c` = create, etc.)
-- **5 participant modes** — `participant` / `reactive` / `off` / `silent` / `protokoll`
-- **Active thread (T-064)** — `/unified switch <name>` sets your active thread; your messages route there even from a bridge you joined via another address
-- **One-shot send (T-064)** — `/unified send <name> <message>` multicasts to a thread without switching
-- **Exit (T-067/T-068)** — `/unified exit [name]` pauses your routing out of a thread: you stay a member but your messages from its chats go back to the normal per-bridge DM (own agent session, not the shared one). Re-enter with `switch`/`join`.
-- **Identity-claim (T-065)** — `/unified identity claim <bridge>~<target>` + `/unified identity confirm <code>` authorize a user-mapping via challenge-response: a code is sent to the target bridge, and only someone who controls both accounts can confirm. Merges the identities in `identity_map.json`. Plus `/unified set username <name>` for a display name shown in `status`.
-- **Unified handles (T-066)** — every participant is shown by a unified handle, not a raw bridge identity: users resolve to `unified~<username>` (fallback `unified~<user_id>`), and the agent resolves to a configurable handle (`extra["agent_handle"]` / `BRIDGE_AGENT_HANDLE`, default `hermes`). Relay messages strip the `unified~` prefix for display (`[alice] text`).
-- **Message relay (T-063)** — every inbound message is mirrored to the outbox of the other member bridges as `[Name] text`, so all humans see the full conversation across messengers. Loop-safe (outbox-only), runs in all modes, the agent still gets the original.
-- **Cross-bridge reply chains** — `gateway_msg_id → {bridge, local_msg_id}` map
-- **Adaptive bundling** — `idle → active → digesting` under high frequency
-- **Member deduplication** — the same person on two bridges = one member; identity map records which wrapper each alias belongs to
-
-**→ [Full docs: `UNIFIED_THREADS.md`](UNIFIED_THREADS.md)**
-
 ## Installation
 
 1. Install the plugin:
