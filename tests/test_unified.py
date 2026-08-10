@@ -646,6 +646,134 @@ def test_protokoll_command_open_via_process_incoming(tmp_path):
     assert a._unified_threads["projekt"]["protokoll"]["name"] == "sitzung"
 
 
+# ── T-059 Task 6: protokoll mode collects messages ───────────────────
+
+
+def test_protokoll_collects_messages(tmp_path):
+    a = _make_adapter(tmp_path)
+    a._extra["allow_all"] = "true"
+    a._load_unified_threads()
+    a._cmd_unified_create("imsg", {"sender": "ronny", "chat": {"id": "u1"}}, "projekt")
+    a._cmd_unified_protokoll_open("imsg", {"sender": "ronny"}, "projekt")
+    a.handle_message = AsyncMock()
+
+    async def run():
+        await a._process_incoming(
+            "imsg",
+            {
+                "sender": "ronny",
+                "text": "Punkt 1 besprochen",
+                "chat": {"id": "u1", "type": "direct"},
+            },
+            tmp_path / "x.json",
+        )
+
+    asyncio.run(run())
+    # Nachricht wurde gesammelt, nicht dispatched
+    a.handle_message.assert_not_awaited()
+    msgs = a._unified_threads["projekt"]["protokoll"]["messages"]
+    assert any("Punkt 1" in m.get("text", "") for m in msgs)
+
+
+def test_protokoll_collects_multiple_and_persists(tmp_path):
+    a = _make_adapter(tmp_path)
+    a._extra["allow_all"] = "true"
+    a._load_unified_threads()
+    a._cmd_unified_create("imsg", {"sender": "ronny", "chat": {"id": "u1"}}, "projekt")
+    a._cmd_unified_protokoll_open("imsg", {"sender": "ronny"}, "projekt", "sitzung")
+    a.handle_message = AsyncMock()
+
+    async def run():
+        await a._process_incoming(
+            "imsg",
+            {
+                "sender": "ronny",
+                "sender_name": "Ronny",
+                "text": "Punkt 1",
+                "chat": {"id": "u1", "type": "direct"},
+            },
+            tmp_path / "a.json",
+        )
+        await a._process_incoming(
+            "imsg",
+            {
+                "sender": "ronny",
+                "sender_name": "Ronny",
+                "text": "Punkt 2",
+                "chat": {"id": "u1", "type": "direct"},
+            },
+            tmp_path / "b.json",
+        )
+
+    asyncio.run(run())
+    a.handle_message.assert_not_awaited()
+    msgs = a._unified_threads["projekt"]["protokoll"]["messages"]
+    assert len(msgs) == 2
+    assert msgs[0]["text"] == "Punkt 1"
+    assert msgs[1]["text"] == "Punkt 2"
+    assert msgs[0]["sender_name"] == "Ronny"
+    # persisted to disk
+    a._load_unified_threads()
+    msgs2 = a._unified_threads["projekt"]["protokoll"]["messages"]
+    assert len(msgs2) == 2
+
+
+def test_protokoll_close_artifact_contains_collected(tmp_path):
+    a = _make_adapter(tmp_path)
+    a._extra["allow_all"] = "true"
+    a._load_unified_threads()
+    a._cmd_unified_create("imsg", {"sender": "ronny", "chat": {"id": "u1"}}, "projekt")
+    a._cmd_unified_protokoll_open("imsg", {"sender": "ronny"}, "projekt", "sitzung")
+    a.handle_message = AsyncMock()
+
+    async def run():
+        await a._process_incoming(
+            "imsg",
+            {
+                "sender": "ronny",
+                "sender_name": "Ronny",
+                "text": "Punkt 1 besprochen",
+                "chat": {"id": "u1", "type": "direct"},
+            },
+            tmp_path / "a.json",
+        )
+
+    asyncio.run(run())
+    a._cmd_unified_protokoll_close("imsg", {"sender": "ronny"}, "projekt")
+    artifact = a._bridge_dir / "protokoll" / "projekt" / "sitzung.md"
+    assert artifact.exists()
+    content = artifact.read_text("utf-8")
+    assert "Punkt 1 besprochen" in content
+    assert "Ronny" in content
+
+
+def test_protokoll_not_dispatched_without_open_session(tmp_path):
+    """If mode=protokoll but no session is open, fall through to participant."""
+    a = _make_adapter(tmp_path)
+    a._extra["allow_all"] = "true"
+    a._load_unified_threads()
+    a._cmd_unified_create("imsg", {"sender": "ronny", "chat": {"id": "u1"}}, "projekt")
+    # set mode to protokoll manually without opening a session
+    a._unified_threads["projekt"]["mode"] = "protokoll"
+    a._save_unified_threads()
+    a.handle_message = AsyncMock()
+
+    async def run():
+        await a._process_incoming(
+            "imsg",
+            {
+                "sender": "ronny",
+                "text": "Hallo",
+                "chat": {"id": "u1", "type": "direct"},
+            },
+            tmp_path / "x.json",
+        )
+
+    asyncio.run(run())
+    # no session open → fall through to normal dispatch
+    a.handle_message.assert_awaited_once()
+
+
 def test_protokoll_command_help_lists_lifecycle(tmp_path):
     a = _make_adapter(tmp_path)
     a._load_unified_threads()

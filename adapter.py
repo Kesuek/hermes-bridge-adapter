@@ -995,6 +995,27 @@ class BridgeAdapter(BasePlatformAdapter):
                 except OSError:
                     pass
                 return
+            if mode == "protokoll":
+                # Protocol mode: collect the message into the live session
+                # (if one is open) instead of dispatching it. If no session
+                # is open, fall through to normal dispatch so a stray
+                # mode=protokoll without /unified protokoll open doesn't
+                # silently swallow messages.
+                prot = self._unified_threads[unified_name].get("protokoll")
+                if prot is not None:
+                    prot["messages"].append({
+                        "ts": _now_iso(),
+                        "sender": sender,
+                        "sender_name": data.get("sender_name") or sender,
+                        "text": text,
+                    })
+                    self._save_unified_threads()
+                    # Not dispatched — protocol logs, doesn't reply.
+                    try:
+                        filepath.unlink()
+                    except OSError:
+                        pass
+                    return
 
         effective_text = f"{text}\n\n[{routing_ctx}]" if text else f"[{routing_ctx}]"
 
