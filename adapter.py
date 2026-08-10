@@ -1151,6 +1151,22 @@ class BridgeAdapter(BasePlatformAdapter):
                         pass
                     return
 
+        # Adaptive digest (T-061): if the thread is in ``digesting`` state,
+        # buffer the message instead of dispatching. Only applies in
+        # participant mode — the agent decides whether to reply. The other
+        # modes (reactive/silent/protokoll) are deterministic and handled
+        # above, so they're unaffected by adaptive bundling.
+        if unified_name:
+            mode = self._unified_threads[unified_name].get("mode", "participant")
+            if mode == "participant":
+                action = self._adaptive_note_message(unified_name, sender, text)
+                if action == "buffer":
+                    try:
+                        filepath.unlink()
+                    except OSError:
+                        pass
+                    return
+
         effective_text = f"{text}\n\n[{routing_ctx}]" if text else f"[{routing_ctx}]"
 
         # Determine message type

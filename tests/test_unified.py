@@ -852,3 +852,24 @@ def test_adaptive_state_transitions(tmp_path):
     # idle → active on first message
     a._adaptive_note_message("projekt", "ronny", "hi")
     assert a._unified_threads["projekt"].get("_adaptive", {}).get("state") == "active"
+
+
+def test_adaptive_buffers_in_digest_mode(tmp_path):
+    from unittest.mock import AsyncMock
+    a = _make_adapter(tmp_path)
+    a._extra["allow_all"] = "true"
+    a._load_unified_threads()
+    a._cmd_unified_create("imsg", {"sender": "ronny", "chat": {"id": "u1"}}, "projekt")
+    a.handle_message = AsyncMock()
+    # 5 fast messages → digesting
+    for i in range(5):
+        a._adaptive_note_message("projekt", "ronny", f"msg {i}")
+    assert a._unified_threads["projekt"]["_adaptive"]["state"] == "digesting"
+    # next message is buffered, not dispatched
+    async def run():
+        await a._process_incoming("imsg", {
+            "sender": "ronny", "text": "msg 5",
+            "chat": {"id": "u1", "type": "direct"},
+        }, tmp_path / "x.json")
+    asyncio.run(run())
+    a.handle_message.assert_not_awaited()
