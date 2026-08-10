@@ -1653,28 +1653,18 @@ class BridgeAdapter(BasePlatformAdapter):
                 user_name=data.get("sender_name") or sender,
                 thread_id=unified_name,
             )
-            # Leader = created_by (thread creator). Mark the sender as
-            # [<Name> Leader] in the routing context so the agent can tell
-            # protocol leadership apart from regular members (T-059).
-            leader = thread.get("created_by", "")
-            leader_name = leader
-            for m in thread.get("members", {}).values():
-                if m.get("user_id") == leader:
-                    leader_name = m.get("user_name") or leader
-                    break
-            # Display normalization: when the wrapper didn't supply a
-            # sender_name, user_name falls back to the raw user_id (often
-            # lowercase). Title-case the first letter so the marker reads
-            # "[Ronny Leader]" rather than "[ronny Leader]".
-            if leader_name:
-                leader_name = leader_name[0].upper() + leader_name[1:]
+            # Routing context for the AGENT (what it sees on an inbound
+            # message). Use the user's unified handle (T-066) so the agent
+            # sees "[Message from Kesuek ...]" not the raw bridge identity.
+            # The thread is decoupled from raw bridge identities.
+            from_handle = self._resolve_unified_handle(bridge, sender)
+            if from_handle.startswith("unified~"):
+                from_handle = from_handle[len("unified~"):]
             routing_ctx = (
-                f"Message from {sender}, bridge {bridge}, "
-                f"unified thread '{unified_name}' ({n_members} members), "
+                f"Message from {from_handle}, "
+                f"unified thread '{unified_name}', "
                 f"reply to unified~{unified_name}"
             )
-            if sender == leader:
-                routing_ctx += f" [{leader_name} Leader]"
             # Message relay (T-063): mirror the message to the other member
             # bridges so all participants see the full conversation. Runs in
             # ALL modes — the mode controls how the AGENT reacts, not whether
@@ -2002,6 +1992,10 @@ class BridgeAdapter(BasePlatformAdapter):
                 )
             results = []
             resolved_reply_to = self._resolve_reply_to(reply_to)
+            # Agent replies into a unified thread are prefixed with the
+            # agent's handle (T-066) so recipients see "[Felix] ..." not an
+            # anonymous message.
+            agent_text = f"[{self._agent_handle}] {text}" if text else text
             for member in members.values():
                 # T-062: a member may have multiple bridge addresses (the
                 # same person joined from several bridges). Multicast to
@@ -2019,7 +2013,7 @@ class BridgeAdapter(BasePlatformAdapter):
                         continue
                     seen.add((mb, mc))
                     r = await self._write_outbox(
-                        mb, f"{mb}~{mc}", text=text, reply_to=resolved_reply_to,
+                        mb, f"{mb}~{mc}", text=agent_text, reply_to=resolved_reply_to,
                     )
                     results.append(r)
             ok = bool(results) and all(r.success for r in results)

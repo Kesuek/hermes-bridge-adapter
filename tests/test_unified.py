@@ -273,8 +273,10 @@ def test_send_unified_multicast_content(tmp_path):
     # Each outbox target is the member's own routable address.
     assert imsg_data["target"] == "imsg~u1"
     assert talk_data["target"] == "talk~t1"
-    assert imsg_data["text"] == "Hallo alle"
-    assert talk_data["text"] == "Hallo alle"
+    # Agent replies into a unified thread are prefixed with the agent's
+    # handle (T-066) so recipients see "[hermes] ...".
+    assert imsg_data["text"] == "[hermes] Hallo alle"
+    assert talk_data["text"] == "[hermes] Hallo alle"
 
 
 # ── Task 2: /unified command parser ──────────────────────────────────
@@ -382,18 +384,23 @@ def test_unified_mode_rejects_invalid_value(tmp_path):
 # ── T-059 Task 1: leader marking in routing context ───────────────────
 
 
-def test_unified_routing_marks_leader(tmp_path):
+def test_unified_routing_uses_unified_handle(tmp_path):
+    """The routing context uses the unified handle (T-066), not the raw
+    bridge identity — "[Message from Kesuek ...]" not "[... from ronny ...]".
+    Leader marking is dropped in favor of the unified handle."""
     a = _make_adapter(tmp_path)
     a._extra["allow_all"] = "true"
     a._load_unified_threads()
-    a._cmd_unified_create("imsg", {"sender": "ronny", "chat": {"id": "u1"}}, "projekt")
+    a._usernames = {"ronny": "Kesuek"}
+    a._identity_map = {"ronny": ["ronny.pietschke@icloud.com", "ronny"]}
+    a._cmd_unified_create("imsg", {"sender": "ronny.pietschke@icloud.com", "chat": {"id": "u1"}}, "projekt")
     a.handle_message = AsyncMock()
 
     async def run():
         await a._process_incoming(
             "imsg",
             {
-                "sender": "ronny",
+                "sender": "ronny.pietschke@icloud.com",
                 "text": "Hallo",
                 "chat": {"id": "u1", "type": "direct"},
             },
@@ -402,7 +409,13 @@ def test_unified_routing_marks_leader(tmp_path):
 
     asyncio.run(run())
     event = a.handle_message.await_args[0][0]
-    assert "[Ronny Leader]" in event.text
+    assert "Message from Kesuek" in event.text
+    assert "unified thread 'projekt'" in event.text
+    assert "reply to unified~projekt" in event.text
+    # No raw bridge identity, no leader suffix, no member count.
+    assert "ronny.pietschke@icloud.com" not in event.text.split("[Message")[1].split("]")[0]
+    assert "Leader]" not in event.text
+    assert "(2 members)" not in event.text
 
 
 def test_unified_routing_no_leader_marker_for_non_leader(tmp_path):
