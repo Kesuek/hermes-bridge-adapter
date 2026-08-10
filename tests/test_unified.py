@@ -361,7 +361,7 @@ def test_unified_help_lists_commands(tmp_path):
     assert "create <name>" in text
     assert "join <name>" in text
     assert "exit" in text
-    assert "mode <name>" in text
+    assert "/u m <name>" in text
     assert "participant" in text
     assert "set username" in text
     assert "identity claim" in text
