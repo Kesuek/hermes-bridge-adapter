@@ -153,20 +153,20 @@ capabilities: [text]
 - **Registry self-registration (T-050)** — bridges register via `registry/` manifests, picked up at runtime without a restart
 - **Agent awareness (T-051)** — a system-prompt platform hint teaches the agent to read `registry/` and address messages as `<bridge>~<target>`; every inbound message carries a compact routing line (`[Message from <sender>, bridge <bridge>, reply to <bridge>~<target>]`)
 - **Routing fallback (T-053)** — `send()` validates the target; unroutable targets (unknown bridge / wrong format) return a clear `SendResult` error instead of silently misrouting
-- **Unified Threads (T-058–T-062) — das Alleinstellungsmerkmal.** Weil jede Bridge über denselben JSON-Datei-Vertrag an den Adapter angebunden ist, können mehrere Bridges eine **gemeinsame Agent-Session** teilen — eine Konversation über iMessage, Talk und jeden anderen Wrapper. Native Gateway-Adapter sind voneinander isoliert; der Bridge Adapter macht daraus einen Thread. `/unified`-Befehle, 5 Teilnehmer-Modi, Reply-Ketten über Bridges, adaptive Bündelung und Member-Dedup. **→ [Vollständige Doku: `UNIFIED_THREADS.md`](UNIFIED_THREADS.md)**
+- **Unified Threads (T-058–T-062) — the differentiator.** Because every bridge is wired to the adapter through the same JSON-file contract, multiple bridges can share a **single agent session** — one conversation across iMessage, Talk, and any other wrapper. Native gateway adapters are isolated from each other; the Bridge Adapter turns them into one thread. `/unified` commands, 5 participant modes, cross-bridge reply chains, adaptive bundling, and member dedup. **→ [Full docs: `UNIFIED_THREADS.md`](UNIFIED_THREADS.md)**
 
 ## Unified Threads (T-058–T-062)
 
-**Das Alleinstellungsmerkmal des Bridge Adapters.** Weil jede Bridge über denselben JSON-Datei-Vertrag an den Adapter angebunden ist, können mehrere Bridges eine **gemeinsame Agent-Session** teilen — eine Konversation über iMessage, Talk und jeden anderen Wrapper. Native Gateway-Adapter sind voneinander isoliert (jede Plattform hat ihre eigene Session); der Bridge Adapter macht daraus **einen Thread über alle deine Messaging-Welten**.
+**The Bridge Adapter's differentiator.** Because every bridge is wired to the adapter through the same JSON-file contract, multiple bridges can share a **single agent session** — one conversation across iMessage, Talk, and any other wrapper. Native gateway adapters are isolated from each other (each platform has its own session); the Bridge Adapter turns them into **one thread across all your messaging worlds**.
 
-Das umfasst:
-- **`/unified`-Befehle** — `create`/`join`/`leave`/`members`/`status`/`mode`/`protokoll`/`help`
-- **5 Teilnehmer-Modi** — `participant` / `reactive` / `off` / `silent` / `protokoll`
-- **Reply-Ketten über Bridges** — `gateway_msg_id → {bridge, local_msg_id}`-Map
-- **Adaptive Bündelung** — `idle → active → digesting` bei hoher Frequenz
-- **Member-Deduplizierung** — dieselbe Person auf zwei Bridges = ein Member
+This includes:
+- **`/unified` commands** — `create`/`join`/`leave`/`members`/`status`/`mode`/`protokoll`/`help`
+- **5 participant modes** — `participant` / `reactive` / `off` / `silent` / `protokoll`
+- **Cross-bridge reply chains** — `gateway_msg_id → {bridge, local_msg_id}` map
+- **Adaptive bundling** — `idle → active → digesting` under high frequency
+- **Member deduplication** — the same person on two bridges = one member
 
-**→ [Vollständige Doku: `UNIFIED_THREADS.md`](UNIFIED_THREADS.md)**
+**→ [Full docs: `UNIFIED_THREADS.md`](UNIFIED_THREADS.md)**
 
 ## Installation
 
