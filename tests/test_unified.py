@@ -1312,3 +1312,29 @@ def test_agent_handle_from_config(tmp_path):
     cfg = PlatformConfig(enabled=True, extra={"bridge_dir": str(bridge_dir), "agent_handle": "felix"})
     a = BridgeAdapter(cfg)
     assert a._agent_handle == "felix"
+
+
+def test_relay_uses_unified_handle(tmp_path):
+    """T-066 Task 3: relay messages show the unified handle, not the raw
+    bridge identity. The ``unified~`` prefix is stripped for display so the
+    relay reads ``[Kesuek] text`` rather than ``[unified~Kesuek] text``."""
+    a = _make_adapter(tmp_path)
+    a._extra["allow_all"] = "true"
+    a._load_unified_threads()
+    a._identity_map = {"ronny": {"wrappers": {"imsg": "ronny.pietschke@icloud.com"},
+                                 "aliases": ["ronny.pietschke@icloud.com", "ronny"]}}
+    a._usernames = {"ronny": "Kesuek"}
+    a._cmd_unified_create("imsg", {"sender": "ronny.pietschke@icloud.com", "chat": {"id": "u1"}}, "projekt")
+    a._cmd_unified_join("talk", {"sender": "anja", "chat": {"id": "t1"}}, "projekt")
+    a.handle_message = AsyncMock()
+    async def run():
+        await a._process_incoming("imsg", {
+            "sender": "ronny.pietschke@icloud.com", "sender_name": "Ronny", "text": "Hallo",
+            "chat": {"id": "u1", "type": "direct"},
+        }, tmp_path / "x.json")
+    asyncio.run(run())
+    # talk-Outbox hat die Relay-Kopie mit dem Unified-Handle
+    talk_files = list((a._bridge_dir / "outbox" / "talk").glob("*.json"))
+    assert talk_files
+    data = json.loads(talk_files[0].read_text("utf-8"))
+    assert "[Kesuek]" in data["text"]

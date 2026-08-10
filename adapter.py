@@ -1681,10 +1681,13 @@ class BridgeAdapter(BasePlatformAdapter):
             # the humans see the message. Placed BEFORE the adaptive buffer
             # check so the humans see the message immediately even while the
             # agent is digesting. The agent still gets the original below.
-            # Use the user's configured display name (T-065) if set, else the
-            # raw sender name — so the relay shows "Kesuek" not the raw alias.
-            person = self._resolve_identity(bridge, sender)
-            relay_name = self._usernames.get(person) or data.get("sender_name") or sender
+            # Use the user's unified handle (T-066) so the relay shows "Kesuek"
+            # not the raw bridge identity. Strip the "unified~" prefix for
+            # display — in a unified thread everything is unified, so
+            # "[Kesuek]" reads cleaner than "[unified~Kesuek]".
+            relay_name = self._resolve_unified_handle(bridge, sender)
+            if relay_name.startswith("unified~"):
+                relay_name = relay_name[len("unified~"):]
             await self._relay_to_other_members(unified_name, bridge, relay_name, text)
         else:
             routable_chat_id = f"{bridge}~{chat_id}"
