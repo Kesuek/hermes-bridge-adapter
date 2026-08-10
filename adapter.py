@@ -491,17 +491,18 @@ class BridgeAdapter(BasePlatformAdapter):
             logger.warning("Bad unified_threads.json: %s", e)
 
     def _save_unified_threads(self) -> None:
-        """Persist unified threads to ``unified_threads.json``."""
+        """Persist unified threads to ``unified_threads.json``.
+
+        Atomic write (temp file + rename) so a concurrent write from another
+        bridge can't leave a truncated/corrupt file. The adapter is a single
+        asyncio loop, but the poll loop and command handlers interleave, and
+        two bridges can dispatch near-simultaneously — a plain ``write_text``
+        would risk a torn write. (Review finding 2026-08-10.)
+        """
         p = self._unified_path()
         if not p:
             return
-        try:
-            p.write_text(
-                json.dumps(self._unified_threads, ensure_ascii=False, indent=2),
-                "utf-8",
-            )
-        except OSError as e:
-            logger.error("Failed to save unified_threads.json: %s", e)
+        self._atomic_write_json(p, self._unified_threads)
 
     # ── Reply map (T-060) ────────────────────────────────────────────────
 
@@ -527,17 +528,32 @@ class BridgeAdapter(BasePlatformAdapter):
             logger.warning("Bad reply_map.json: %s", e)
 
     def _save_reply_map(self) -> None:
-        """Persist the reply map to ``reply_map.json``."""
+        """Persist the reply map to ``reply_map.json`` (atomic write)."""
         p = self._reply_map_path()
         if not p:
             return
+        self._atomic_write_json(p, self._reply_map)
+
+    def _atomic_write_json(self, path: Path, data: dict) -> None:
+        """Write a JSON dict atomically: temp file + rename.
+
+        ``os.replace`` is atomic on POSIX — a concurrent reader sees either
+        the old or the new file, never a torn write. This guards the three
+        mutating persistence files (unified_threads/reply_map/identity_map)
+        against near-simultaneous writes from multiple bridges.
+        """
+        tmp = path.with_suffix(path.suffix + ".tmp")
         try:
-            p.write_text(
-                json.dumps(self._reply_map, ensure_ascii=False, indent=2),
-                "utf-8",
+            tmp.write_text(
+                json.dumps(data, ensure_ascii=False, indent=2), "utf-8"
             )
+            os.replace(tmp, path)
         except OSError as e:
-            logger.error("Failed to save reply_map.json: %s", e)
+            logger.error("Failed to save %s: %s", path, e)
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
 
     def _resolve_reply_to(self, reply_to: Optional[str]) -> Optional[str]:
         """Resolve a gateway_msg_id reply_to to the bridge-local id (T-060).
