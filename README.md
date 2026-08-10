@@ -153,15 +153,17 @@ capabilities: [text]
 - **Registry self-registration (T-050)** — bridges register via `registry/` manifests, picked up at runtime without a restart
 - **Agent awareness (T-051)** — a system-prompt platform hint teaches the agent to read `registry/` and address messages as `<bridge>~<target>`; every inbound message carries a compact routing line (`[Message from <sender>, bridge <bridge>, reply to <bridge>~<target>]`)
 - **Routing fallback (T-053)** — `send()` validates the target; unroutable targets (unknown bridge / wrong format) return a clear `SendResult` error instead of silently misrouting
-- **Unified Threads (T-058–T-063) — the differentiator.** Because every bridge is wired to the adapter through the same JSON-file contract, multiple bridges can share a **single agent session** — one conversation across iMessage, Talk, and any other wrapper. Native gateway adapters are isolated from each other; the Bridge Adapter turns them into one thread. `/unified` commands, 5 participant modes, cross-bridge reply chains, adaptive bundling, member dedup, and **message relay** that mirrors every inbound message to the other member bridges so all humans see the full conversation. **→ [Full docs: `UNIFIED_THREADS.md`](UNIFIED_THREADS.md)**
+- **Unified Threads (T-058–T-064) — the differentiator.** Because every bridge is wired to the adapter through the same JSON-file contract, multiple bridges can share a **single agent session** — one conversation across iMessage, Talk, and any other wrapper. Native gateway adapters are isolated from each other; the Bridge Adapter turns them into one thread. `/unified` commands, 5 participant modes, cross-bridge reply chains, adaptive bundling, member dedup, **message relay** that mirrors every inbound message to the other member bridges so all humans see the full conversation, plus **active-thread switching** and **one-shot send** (T-064). **→ [Full docs: `UNIFIED_THREADS.md`](UNIFIED_THREADS.md)**
 
-## Unified Threads (T-058–T-063)
+## Unified Threads (T-058–T-064)
 
 **The Bridge Adapter's differentiator.** Because every bridge is wired to the adapter through the same JSON-file contract, multiple bridges can share a **single agent session** — one conversation across iMessage, Talk, and any other wrapper. Native gateway adapters are isolated from each other (each platform has its own session); the Bridge Adapter turns them into **one thread across all your messaging worlds**.
 
 This includes:
-- **`/unified` commands** — `create`/`join`/`leave`/`members`/`status`/`mode`/`protokoll`/`help`
+- **`/unified` commands** — `create`/`join`/`leave`/`members`/`status`/`mode`/`switch`/`send`/`protokoll`/`help`
 - **5 participant modes** — `participant` / `reactive` / `off` / `silent` / `protokoll`
+- **Active thread (T-064)** — `/unified switch <name>` sets your active thread; your messages route there even from a bridge you joined via another address
+- **One-shot send (T-064)** — `/unified send <name> <message>` multicasts to a thread without switching
 - **Message relay (T-063)** — every inbound message is mirrored to the outbox of the other member bridges as `[Name] text`, so all humans see the full conversation across messengers. Loop-safe (outbox-only), runs in all modes, the agent still gets the original.
 - **Cross-bridge reply chains** — `gateway_msg_id → {bridge, local_msg_id}` map
 - **Adaptive bundling** — `idle → active → digesting` under high frequency

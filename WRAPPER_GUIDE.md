@@ -423,7 +423,7 @@ def write_unified_command(sender, chat_id, command_text):
     )
 ```
 
-Available commands: `create <name>`, `status`, `join <name>`, `leave <name>`, `members <name>`, `mode <name> <mode>`, `protokoll open <name> [sitzung]`, `protokoll close <name>`, `help`.
+Available commands: `create <name>`, `status`, `join <name>`, `leave <name>`, `members <name>`, `mode <name> <mode>`, `switch <name>`, `send <name> <message>`, `protokoll open <name> [sitzung]`, `protokoll close <name>`, `help`.
 
 ### Delivering multicast replies
 

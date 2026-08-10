@@ -28,6 +28,8 @@ A message starting with `/unified` is parsed by the adapter as a command (it nev
 | `/unified leave <name>` | Leave a thread |
 | `/unified members <name>` | List the members of a thread |
 | `/unified mode <name> <mode>` | Set the mode — `participant` / `reactive` / `off` / `silent` / `protokoll` |
+| `/unified switch <name>` | Set this thread as your **active thread** — your messages route here (T-064) |
+| `/unified send <name> <message>` | One-shot send to a thread (multicast to all members, no switch) (T-064) |
 | `/unified protokoll open <name> [sitzung]` | Open a protokoll session (leader-only) |
 | `/unified protokoll close <name>` | Close the protokoll session (leader-only) |
 | `/unified help` | Show the command list |
@@ -50,6 +52,27 @@ outbox/talk/<uuid>.json   → target = talk~<chat_id>
 Each wrapper delivers its copy via its own platform API — **one agent reply reaches every bridge in the thread**.
 
 > **⚠️ The session chat_id must be routable.** The session `chat_id` is `unified~<name>`, NOT the bare `unified`. When the agent replies *through the session* (not by explicitly addressing `unified~<name>`), the gateway sends to the session chat_id. If that is `unified`, `_resolve_bridge_or_none` finds no `~` prefix → `bridge prefix unknown`. `unified~<name>` triggers the multicast branch. (Regression: caught live 2026-08-10, commit `dcd959c`.)
+
+## Active thread (`switch`, T-064)
+
+A user with multiple unified threads picks one as their **active thread** via `/unified switch <name>`. From then on, their incoming messages route onto that thread — even when the membership lookup (`_find_unified_for_member`) finds no match for the source `{bridge}:{chat_id}` (e.g. the user is a member via a different bridge, or joined then switched). The active thread is stored **per canonical person** (identity map, T-062), so the same person on two bridges switches once.
+
+```
+<bridge_dir>/active_threads.json
+{ "ronny": "projekt", "anja": "team" }
+```
+
+- **Membership required** — `switch` is only allowed on threads the user is already a member of. It's "which of my threads is active", not "join a new one". Join first with `/unified join <name>`.
+- **Inbound fallback** — in `_process_incoming`, after the membership scan misses, the adapter checks `_active_threads[person]`. If set and the thread still exists, the message maps onto it.
+- **Persists across restarts** — `active_threads.json` is loaded on `connect()` and rewritten on every `switch`.
+
+## One-shot send (`send`, T-064)
+
+`/unified send <name> <message>` delivers a single message to a unified thread **without switching** the active thread. It uses the existing multicast path (`send("unified~<name>", message)`) — one outbox JSON per member bridge — so every member sees the message on their own platform.
+
+- **No membership requirement on the sender** — framework auth gates who may address the bridge; `send()` itself rejects unknown threads.
+- **No mode interaction** — the message is written directly to the outbox; it does not pass through the adaptive buffer or mode gating (those apply to *inbound* dispatch, this is *outbound*).
+- **Use case** — reply to a thread from a context where you don't want to switch (e.g. a quick ping from another bridge), or send as a one-off without committing.
 
 ## Message-Relay (T-063)
 
@@ -184,6 +207,8 @@ Unified threads are persisted in `<bridge_dir>/unified_threads.json`:
 ```
 
 Members are keyed by `{bridge}:{chat_id}` (the first address a person joined from). The file is loaded on `connect()` and rewritten on every mutating command, so threads survive a gateway restart. While a protokoll session is open, `protokoll` holds `{name, opened_at, opened_by, messages: [...]}`; after `close` it reverts to `null`. The `_adaptive` block (T-061) tracks the per-thread state-machine state and message buffer.
+
+The **active thread** map (T-064) lives in a separate file, `<bridge_dir>/active_threads.json` (`{person → thread_name}`), also loaded on `connect()` and rewritten on every `/unified switch`.
 
 ## Notes / limits
 
