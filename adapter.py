@@ -790,6 +790,7 @@ class BridgeAdapter(BasePlatformAdapter):
             "leave": self._cmd_unified_leave,
             "members": self._cmd_unified_members,
             "mode": self._cmd_unified_mode,
+            "switch": self._cmd_unified_switch,
             "protokoll": None,
         }
         handler = dispatch.get(sub)
@@ -869,6 +870,14 @@ class BridgeAdapter(BasePlatformAdapter):
                 await self._send_reply(
                     bridge, data, self._cmd_unified_mode(bridge, data, name, mode)
                 )
+        elif sub == "switch":
+            name = args[0] if args else ""
+            if not name:
+                await self._send_reply(bridge, data, "Usage: /unified switch <name>")
+            else:
+                await self._send_reply(
+                    bridge, data, self._cmd_unified_switch(bridge, data, name)
+                )
 
         # Remove the processed inbox file.
         try:
@@ -886,6 +895,7 @@ class BridgeAdapter(BasePlatformAdapter):
             "  /unified leave <name>       — leave a unified thread\n"
             "  /unified members <name>     — list members of a thread\n"
             "  /unified mode <name> <mode> — set mode (participant | reactive | off | silent | protokoll)\n"
+            "  /unified switch <name>     — set this thread as your active one (your messages route here)\n"
             "  /unified protokoll open <name> [sitzung] — open a protokoll session (leader-only)\n"
             "  /unified protokoll close <name>         — close + write the protokoll artifact (leader-only)\n"
             "  /unified help                — this help\n\n"
@@ -991,6 +1001,39 @@ class BridgeAdapter(BasePlatformAdapter):
         thread["mode"] = mode
         self._save_unified_threads()
         return f"Mode of '{name}' set to '{mode}'."
+
+    def _cmd_unified_switch(self, bridge: str, data: dict, name: str) -> str:
+        """Set the user's active thread (T-064).
+
+        Only allowed on threads the user is already a member of — switch is
+        "pick which of my threads is active", not "join a new one". If the
+        user isn't a member, reject with a clear message so they join first.
+        The active thread is stored per canonical person (identity map),
+        so the same person on two bridges switches once.
+        """
+        thread = self._unified_threads.get(name)
+        if not thread:
+            return f"Unified thread '{name}' not found."
+        person = self._resolve_identity(bridge, data.get("sender", ""))
+        # Membership check: the person must be a member (via their canonical
+        # identity) OR via any of their bridge addresses matching the sender.
+        is_member = False
+        for m in thread.get("members", {}).values():
+            if m.get("person") == person:
+                is_member = True
+                break
+            for addr in m.get("addresses", []):
+                if addr.get("user_id") == data.get("sender", ""):
+                    is_member = True
+                    break
+        if not is_member:
+            return (
+                f"You are not a member of '{name}'. "
+                f"Join it first with /unified join {name}."
+            )
+        self._active_threads[person] = name
+        self._save_active_threads()
+        return f"Switched to unified thread '{name}'. Your messages now go there."
 
     # ── Adaptive state machine (T-061) ──────────────────────────────────
 

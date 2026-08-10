@@ -1129,3 +1129,17 @@ def test_active_thread_persist_roundtrip(tmp_path):
     a._active_threads = {}
     a._load_active_threads()
     assert a._active_threads["ronny"] == "projekt"
+
+
+def test_unified_switch_sets_active_thread(tmp_path):
+    """T-064 Task 2: /unified switch sets the user's active thread.
+
+    Switch is only allowed on threads the user is already a member of —
+    the creator is a member by default, so this switches without join.
+    """
+    a = _make_adapter(tmp_path)
+    a._load_unified_threads()
+    a._load_active_threads()
+    a._cmd_unified_create("imsg", {"sender": "ronny", "chat": {"id": "u1"}}, "projekt")
+    a._cmd_unified_switch("imsg", {"sender": "ronny"}, "projekt")
+    assert a._active_threads["ronny"] == "projekt"
