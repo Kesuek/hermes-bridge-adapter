@@ -1363,6 +1363,41 @@ def test_identity_confirm_merges(tmp_path):
     assert not a._pending_claims
 
 
+def test_identity_confirm_bruteforce_invalidates_claim(tmp_path):
+    """Review finding (2026-08-10): a confirm code must be brute-force safe.
+
+    Too many wrong attempts against a pending claim invalidate it, so a
+    malicious already-authorized user cannot guess codes to bind a foreign
+    identity to themselves. Once invalidated, even the correct code is
+    rejected and the claim is gone.
+    """
+    from unittest.mock import AsyncMock
+    a = _make_adapter(tmp_path)
+    a._bridges = ["imsg", "talk"]
+    a._load_unified_threads()
+    a._load_pending_claims()
+    a._load_identity_map()
+    a._write_outbox = AsyncMock()  # claim sends a code to the target bridge
+    # claim von imsg auf talk~ronny
+    asyncio.run(a._cmd_unified_identity_claim("imsg", {"sender": "ronny.pietschke@icloud.com"}, "talk~ronny"))
+    claim_id = next(iter(a._pending_claims))
+    code = a._pending_claims[claim_id]["code"]
+    max_attempts = a.IDENTITY_CONFIRM_MAX_ATTEMPTS
+    # Wrong attempts from an authorized user on the target bridge. Pick
+    # codes guaranteed to differ from the real one (avoid flaky collisions).
+    wrong = 0
+    for _ in range(max_attempts):
+        while f"{wrong:06d}" == code:
+            wrong += 1
+        result = a._cmd_unified_identity_confirm("talk", {"sender": "ronny"}, f"{wrong:06d}")
+        wrong += 1
+        assert "invalid" in result.lower() or "unknown" in result.lower()
+    # Claim is invalidated — even the correct code now fails.
+    result = a._cmd_unified_identity_confirm("talk", {"sender": "ronny"}, code)
+    assert "invalid" in result.lower() or "unknown" in result.lower()
+    assert not a._pending_claims
+
+
 def test_set_username(tmp_path):
     """T-065 Task 4: /unified set username <name> sets the display name."""
     a = _make_adapter(tmp_path)

@@ -23,8 +23,8 @@ import asyncio
 import json
 import logging
 import os
-import random
 import re
+import secrets
 import shutil
 import time
 import uuid
@@ -249,6 +249,10 @@ class BridgeAdapter(BasePlatformAdapter):
     SUPPORTS_MESSAGE_EDITING = False
     MAX_MESSAGE_LENGTH = MAX_MESSAGE_LENGTH
     splits_long_messages = True
+
+    # Identity-claim confirm: a wrong-code counter that invalidates the
+    # claim after N attempts (review finding 2026-08-10 — brute-force guard).
+    IDENTITY_CONFIRM_MAX_ATTEMPTS = 5
 
     def __init__(self, config: PlatformConfig):
         platform = Platform("bridge-adapter")
@@ -1370,13 +1374,14 @@ class BridgeAdapter(BasePlatformAdapter):
                 f"Registered: {', '.join(self._bridges) or '(none)'}"
             )
         source = f"{bridge}:{data.get('sender', '')}"
-        code = f"{random.randint(0, 999999):06d}"
+        code = f"{secrets.randbelow(1_000_000):06d}"
         claim_id = str(uuid.uuid4())[:8]
         self._pending_claims[claim_id] = {
             "code": code,
             "source": source,
             "target": target,
             "expires": time.time() + 300,  # 5 min
+            "attempts": 0,
         }
         self._save_pending_claims()
         # Send the code to the target bridge so only someone who reads that
@@ -1396,8 +1401,19 @@ class BridgeAdapter(BasePlatformAdapter):
         the pending claim is cleared.
         """
         now = time.time()
+        # Wrong-code guard: any mismatching claim gets an attempt counted;
+        # too many invalidates it (brute-force protection, review finding 2026-08-10).
         for claim_id, claim in list(self._pending_claims.items()):
+            if claim.get("attempts", 0) >= self.IDENTITY_CONFIRM_MAX_ATTEMPTS:
+                # Already brute-forced → drop it before checking the code.
+                del self._pending_claims[claim_id]
+                self._save_pending_claims()
+                continue
             if claim["code"] != code:
+                claim["attempts"] = claim.get("attempts", 0) + 1
+                if claim["attempts"] >= self.IDENTITY_CONFIRM_MAX_ATTEMPTS:
+                    del self._pending_claims[claim_id]
+                self._save_pending_claims()
                 continue
             if now > claim["expires"]:
                 del self._pending_claims[claim_id]
