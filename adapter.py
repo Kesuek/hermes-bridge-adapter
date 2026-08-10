@@ -1252,6 +1252,14 @@ class BridgeAdapter(BasePlatformAdapter):
             )
             if sender == leader:
                 routing_ctx += f" [{leader_name} Leader]"
+            # Message relay (T-063): mirror the message to the other member
+            # bridges so all participants see the full conversation. Runs in
+            # ALL modes — the mode controls how the AGENT reacts, not whether
+            # the humans see the message. Placed BEFORE the adaptive buffer
+            # check so the humans see the message immediately even while the
+            # agent is digesting. The agent still gets the original below.
+            relay_name = data.get("sender_name") or sender
+            await self._relay_to_other_members(unified_name, bridge, relay_name, text)
         else:
             routable_chat_id = f"{bridge}~{chat_id}"
             source = SessionSource(

@@ -1026,3 +1026,29 @@ def test_relay_to_other_members(tmp_path):
     # imsg-Outbox ist leer (nicht an Ursprungs-Bridge)
     imsg_files = list((a._bridge_dir / "outbox" / "imsg").glob("*.json"))
     assert not imsg_files, "relay must not write back to source bridge"
+
+
+def test_inbound_relays_to_other_members(tmp_path):
+    """T-063 Task 3: _process_incoming mirrors to other members AND dispatches."""
+    a = _make_adapter(tmp_path)
+    a._extra["allow_all"] = "true"
+    a._load_unified_threads()
+    a._cmd_unified_create("imsg", {"sender": "ronny", "chat": {"id": "u1"}}, "projekt")
+    a._cmd_unified_join("talk", {"sender": "anja", "chat": {"id": "t1"}}, "projekt")
+    a.handle_message = AsyncMock()
+    inbox = tmp_path / "x.json"
+
+    async def run():
+        await a._process_incoming("imsg", {
+            "sender": "ronny", "sender_name": "Ronny", "text": "Hallo",
+            "chat": {"id": "u1", "type": "direct"},
+        }, inbox)
+
+    asyncio.run(run())
+    # Agent bekommt die Nachricht (bleibt im Kontext)
+    a.handle_message.assert_awaited_once()
+    # talk-Outbox hat die Relay-Kopie
+    talk_files = list((a._bridge_dir / "outbox" / "talk").glob("*.json"))
+    assert talk_files, "relay should write to talk outbox"
+    data = json.loads(talk_files[0].read_text("utf-8"))
+    assert "[Ronny]" in data["text"]
