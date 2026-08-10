@@ -198,16 +198,17 @@ Each wrapper then delivers its copy via its own platform API, so one agent reply
 
 ### Teilnehmer-Modi (T-059)
 
-Every unified thread has a `mode` field (default `participant`) that controls how the adapter dispatches incoming member messages. The adapter enforces `reactive`/`silent`/`protokoll` **deterministically before the gateway sees the message** — only `participant` lets the agent decide.
+Every unified thread has a `mode` field (default `participant`) that controls how the adapter dispatches incoming member messages. The adapter enforces `reactive`/`off`/`silent`/`protokoll` **deterministically before the gateway sees the message** — only `participant` lets the agent decide.
 
 | Mode | Behaviour | Set with |
 |------|-----------|----------|
 | `participant` (default) | The agent decides whether to reply. It is taught (via `platform_hint`) to emit the literal token `NO_REPLY` when it has nothing to contribute; the gateway suppresses that reply. | `/unified mode <name> participant` |
 | `reactive` | Mention-gating like a group chat: only messages that mention the agent (`@hermes`, or a bridge-specific `mention_patterns` match) are dispatched. Un-mentioned messages are dropped + the inbox file is deleted. | `/unified mode <name> reactive` |
-| `silent` | Listener: the agent never replies. All messages are dropped + the inbox file is deleted — no agent turn is triggered. The agent still keeps the thread history via session persistence, so it "reads along" when it later returns to the thread. | `/unified mode <name> silent` |
+| `off` | The agent gets nothing — no context, no turn. Every message is dropped + the inbox file is deleted. | `/unified mode <name> off` |
+| `silent` | Mute switch: the agent reads along but never replies. Every message is buffered and flushed periodically (digest_interval) as one bundled turn, so the agent keeps context without responding. The digest is marked `[Silent digest — read only, do not reply]`. | `/unified mode <name> silent` |
 | `protokoll` | Protocol mode: incoming messages are collected into the live protokoll session instead of dispatched. The agent does not reply while a session is open. See [Protokoll-Lifecycle](#protokoll-lifecycle). | `/unified protokoll open <name>` |
 
-> **Note:** `reactive`/`silent`/`protokoll` drop the message in the adapter — the agent never sees it on this turn. The agent's shared session still accumulates history from the turns it *does* see, so later context is preserved.
+> **Note:** `reactive`/`off` drop the message in the adapter — the agent never sees it on this turn. `silent` buffers it into a digest (the agent reads along but never replies). `protokoll` collects it into the session. The agent's shared session still accumulates history from the turns it *does* see, so later context is preserved.
 
 #### Leader-Markierung
 
@@ -286,7 +287,7 @@ idle → active → digesting
 - **`active`** — the thread has seen messages; each message is dispatched as its own turn (the normal `participant` behaviour).
 - **`digesting`** — the thread has seen high frequency (3 messages in 30s, or 5 in 60s, sliding window). Incoming messages are **buffered** instead of dispatched. After `digest_interval` (60s) the buffer is **flushed as a single bundled turn**: one `MessageEvent` whose text is a `[System: N messages from M users]` header followed by one `[HH:MM] [sender] text` line per buffered message. After the flush the state returns to `active` with a short cooldown.
 
-State and buffer persist in `unified_threads.json` (the `_adaptive` block), so a gateway restart doesn't lose the in-flight digest window. Adaptive only applies in **`participant`** mode — the deterministic modes (`reactive`/`silent`/`protokoll`) are unaffected.
+State and buffer persist in `unified_threads.json` (the `_adaptive` block), so a gateway restart doesn't lose the in-flight digest window. Adaptive only applies in **`participant`** mode — the deterministic modes (`reactive`/`off`/`protokoll`) are unaffected. `silent` reuses the same buffer but always collects (mute switch), not just under high frequency.
 
 The thresholds and intervals are class constants on `BridgeAdapter` (`ADAPTIVE_THRESHOLD_30`, `ADAPTIVE_THRESHOLD_60`, `ADAPTIVE_DIGEST_INTERVAL`, `ADAPTIVE_COOLDOWN`).
 
@@ -311,8 +312,8 @@ The file is loaded on `connect()`. Unknown aliases pass through unchanged, so th
 
 - **Auth stays framework-side.** A user not authorized on a bridge is dropped by the gateway's authz mixin before the adapter's mapping sees them — they cannot join a thread.
 - **Mention patterns** drive `reactive` mode (and group-chat gating). The default patterns match `@hermes` / `hermes agent`; a bridge can override via `mention_patterns` in its manifest / `BRIDGE_MENTION_PATTERNS`. A message is "mentioned" if any pattern matches it.
-- **`NO_REPLY` marker** is only relevant in `participant` mode — the agent emits the literal token `NO_REPLY` (or `[SILENT]`) and the gateway suppresses delivery. The other three modes drop deterministically in the adapter before the agent is ever called.
-- **Adaptive + modes** — adaptive bundling only applies in `participant` mode; `reactive` drops un-mentioned messages anyway (no digest needed), `silent`/`protokoll` are deterministic.
+- **`NO_REPLY` marker** is only relevant in `participant` mode — the agent emits the literal token `NO_REPLY` (or `[SILENT]`) and the gateway suppresses delivery. The other modes drop or buffer deterministically in the adapter before the agent is ever called.
+- **Adaptive + modes** — adaptive bundling only applies in `participant` mode; `reactive`/`off` drop un-mentioned messages anyway (no digest needed), `protokoll` collects into the session, `silent` always buffers (mute switch).
 - **Identity map is opt-in** — without an `identity_map.json` entry, a sender's `person` equals its raw `user_id`, so two different people with the same id on different bridges would be merged. Add explicit entries to control which aliases belong together.
 
 ## Installation
