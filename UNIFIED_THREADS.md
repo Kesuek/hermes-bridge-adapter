@@ -51,6 +51,23 @@ Each wrapper delivers its copy via its own platform API — **one agent reply re
 
 > **⚠️ The session chat_id must be routable.** The session `chat_id` is `unified~<name>`, NOT the bare `unified`. When the agent replies *through the session* (not by explicitly addressing `unified~<name>`), the gateway sends to the session chat_id. If that is `unified`, `_resolve_bridge_or_none` finds no `~` prefix → `bridge prefix unknown`. `unified~<name>` triggers the multicast branch. (Regression: caught live 2026-08-10, commit `dcd959c`.)
 
+## Message-Relay (T-063)
+
+In a Unified Thread, an incoming message from one member is **mirrored to the outbox of every other member bridge** — so all human participants see the full conversation across messenger boundaries, like a team chat across iMessage, Talk, and any other wrapper. The agent still receives the original message (it stays in context); the relay is **additional**, for the humans.
+
+```
+imsg: "Hallo alle"  →  agent (dispatched normally)
+                  →  talk outbox:  "[Ronny] Hallo alle"
+                  →  matrix outbox: "[Ronny] Hallo alle"
+                  →  imsg outbox:  (nothing — source is excluded)
+```
+
+- **Format:** `[<Name>] text` — the sender's display name is prefixed so recipients know who wrote. No timestamp (each platform shows its own), no bridge prefix (the name is enough).
+- **Targets:** every member address whose bridge is NOT the source, deduped per `(bridge, chat_id)`. A person who joined from two bridges receives the message on both (multicast); the same address is never written twice.
+- **Runs in ALL modes** — `participant` / `reactive` / `off` / `silent` / `protokoll`. The mode controls how the **agent** reacts; the humans always see the message. The relay fires **before** the mode checks, and before the adaptive buffer check, so it is never gated or delayed by the mode/state machine.
+- **Loop-safe** — the relay copy goes only into the **outbox** (the wrapper sends it via its platform API). The wrappers never feed sent messages back into the adapter's `inbox`, so a relayed copy can't be re-dispatched as an inbound message. No loop is possible.
+- **Source excluded** — the originator's own bridge gets no relay copy; they already see their message on their platform.
+
 ## Participant modes
 
 Every thread has a `mode` field (default `participant`) that controls how the adapter dispatches incoming member messages. `reactive`/`off`/`silent`/`protokoll` are enforced **deterministically before the gateway** — only `participant` lets the agent decide.
@@ -117,18 +134,23 @@ The file is loaded on `connect()` and rewritten on every inbound registration, s
 
 ## Member deduplication
 
-The same person may appear on two bridges under different aliases — `ronny.pietschke@icloud.com` on iMessage and `ronny` on Talk — but they are one person and should be one member of a unified thread. The adapter collapses aliases via a persisted identity map:
+The same person may appear on two bridges under different aliases — `ronny.pietschke@icloud.com` on iMessage and `ronny` on Talk — but they are one person and should be one member of a unified thread. The adapter collapses aliases via a persisted identity map. As of T-063 the map records **which wrapper each alias belongs to**, so a `(wrapper, user_id)` pair resolves precisely (preventing two people who share a bare alias on different wrappers from being merged):
 
 ```
 <bridge_dir>/identity_map.json
-{ "ronny": ["ronny.pietschke@icloud.com", "+491****4968", "ronny"] }
+{
+  "ronny": {
+    "aliases": ["ronny.pietschke@icloud.com", "+491****4968", "ronny"],
+    "wrappers": {"imsg": "ronny.pietschke@icloud.com", "talk": "ronny"}
+  }
+}
 ```
 
-- **`_resolve_identity(user_id)`** maps a bridge-local user_id to the canonical person (returns the user_id itself if unknown).
+- **`_resolve_identity(wrapper, user_id)`** maps a `(wrapper, user_id)` pair to the canonical person: a wrapper-declared alias match wins; a bare-alias match is the fallback; an unknown pair returns the `user_id` itself. The legacy bare-list shape (`{"ronny": ["..."]}`) and the 1-arg call form remain supported for backwards compatibility.
 - **Member record** — every member gets a `person` field (the canonical identity) and an `addresses` array of `{bridge, chat_id, user_id}` entries.
 - **Join dedup** — `_cmd_unified_join` checks whether the sender's canonical `person` is already a member. If so, the new `{bridge}:{chat_id}` address is merged into the existing member's `addresses` array instead of creating a duplicate member entry. The primary member key stays the first address the person joined from.
 - **Inbound routing** — `_find_unified_for_member` scans both the top-level `{bridge}:{chat_id}` keys and the merged `addresses` arrays, so a message from any of a person's bridges still maps to the shared thread.
-- **Multicast** — `send("unified~<name>")` multicasts to every member's primary address **and** every merged address (deduped), so a person on two bridges receives the reply on both.
+- **Multicast** — `send("unified~<name>")` multicasts to every member's primary address **and** every merged address (deduped), so a person on two bridges receives the reply on both. The message **relay** (T-063) mirrors inbound messages the same way.
 
 The file is loaded on `connect()`. Unknown aliases pass through unchanged, so the identity map is purely opt-in.
 
