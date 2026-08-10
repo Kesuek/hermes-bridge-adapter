@@ -369,3 +369,53 @@ def test_unified_mode_rejects_invalid_value(tmp_path):
     )
     # invalid value → mode unchanged (stays default participant)
     assert a._unified_threads["projekt"]["mode"] == "participant"
+
+
+# ── T-059 Task 1: leader marking in routing context ───────────────────
+
+
+def test_unified_routing_marks_leader(tmp_path):
+    a = _make_adapter(tmp_path)
+    a._extra["allow_all"] = "true"
+    a._load_unified_threads()
+    a._cmd_unified_create("imsg", {"sender": "ronny", "chat": {"id": "u1"}}, "projekt")
+    a.handle_message = AsyncMock()
+
+    async def run():
+        await a._process_incoming(
+            "imsg",
+            {
+                "sender": "ronny",
+                "text": "Hallo",
+                "chat": {"id": "u1", "type": "direct"},
+            },
+            tmp_path / "x.json",
+        )
+
+    asyncio.run(run())
+    event = a.handle_message.await_args[0][0]
+    assert "[Ronny Leader]" in event.text
+
+
+def test_unified_routing_no_leader_marker_for_non_leader(tmp_path):
+    a = _make_adapter(tmp_path)
+    a._extra["allow_all"] = "true"
+    a._load_unified_threads()
+    a._cmd_unified_create("imsg", {"sender": "ronny", "chat": {"id": "u1"}}, "projekt")
+    a._cmd_unified_join("talk", {"sender": "anja", "chat": {"id": "t1"}}, "projekt")
+    a.handle_message = AsyncMock()
+
+    async def run():
+        await a._process_incoming(
+            "talk",
+            {
+                "sender": "anja",
+                "text": "Hi",
+                "chat": {"id": "t1", "type": "direct"},
+            },
+            tmp_path / "x.json",
+        )
+
+    asyncio.run(run())
+    event = a.handle_message.await_args[0][0]
+    assert "Leader]" not in event.text

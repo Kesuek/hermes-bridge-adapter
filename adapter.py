@@ -775,7 +775,8 @@ class BridgeAdapter(BasePlatformAdapter):
         # chat_id="unified", thread_id=<name>). Replies go to unified~<name>.
         unified_name = self._find_unified_for_member(bridge, chat_id)
         if unified_name:
-            n_members = len(self._unified_threads[unified_name].get("members", {}))
+            thread = self._unified_threads[unified_name]
+            n_members = len(thread.get("members", {}))
             source = SessionSource(
                 platform=Platform("bridge-adapter"),
                 chat_id="unified",
@@ -785,11 +786,28 @@ class BridgeAdapter(BasePlatformAdapter):
                 user_name=data.get("sender_name") or sender,
                 thread_id=unified_name,
             )
+            # Leader = created_by (thread creator). Mark the sender as
+            # [<Name> Leader] in the routing context so the agent can tell
+            # protocol leadership apart from regular members (T-059).
+            leader = thread.get("created_by", "")
+            leader_name = leader
+            for m in thread.get("members", {}).values():
+                if m.get("user_id") == leader:
+                    leader_name = m.get("user_name") or leader
+                    break
+            # Display normalization: when the wrapper didn't supply a
+            # sender_name, user_name falls back to the raw user_id (often
+            # lowercase). Title-case the first letter so the marker reads
+            # "[Ronny Leader]" rather than "[ronny Leader]".
+            if leader_name:
+                leader_name = leader_name[0].upper() + leader_name[1:]
             routing_ctx = (
                 f"Message from {sender}, bridge {bridge}, "
                 f"unified thread '{unified_name}' ({n_members} members), "
                 f"reply to unified~{unified_name}"
             )
+            if sender == leader:
+                routing_ctx += f" [{leader_name} Leader]"
         else:
             routable_chat_id = f"{bridge}~{chat_id}"
             source = SessionSource(
