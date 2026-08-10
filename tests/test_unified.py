@@ -547,3 +547,109 @@ def test_platform_hint_teaches_participant_no_reply():
     register(_Ctx())
     assert "NO_REPLY" in hints["hint"]
     assert "participant" in hints["hint"]
+
+
+# ── T-059 Task 5: protokoll mode lifecycle (open/close) ──────────────
+
+
+def test_protokoll_open_leader_only(tmp_path):
+    a = _make_adapter(tmp_path)
+    a._load_unified_threads()
+    a._cmd_unified_create("imsg", {"sender": "ronny", "chat": {"id": "u1"}}, "projekt")
+    a._cmd_unified_join("talk", {"sender": "anja", "chat": {"id": "t1"}}, "projekt")
+    # Nicht-Leader darf nicht öffnen
+    r = a._cmd_unified_protokoll_open("talk", {"sender": "anja"}, "projekt")
+    assert "only" in r.lower() or "leader" in r.lower()
+    assert a._unified_threads["projekt"].get("protokoll") is None
+    # Leader darf öffnen
+    r2 = a._cmd_unified_protokoll_open("imsg", {"sender": "ronny"}, "projekt")
+    assert "open" in r2.lower() or "started" in r2.lower()
+    assert a._unified_threads["projekt"].get("protokoll") is not None
+
+
+def test_protokoll_open_explicit_name(tmp_path):
+    a = _make_adapter(tmp_path)
+    a._load_unified_threads()
+    a._cmd_unified_create("imsg", {"sender": "ronny", "chat": {"id": "u1"}}, "projekt")
+    r = a._cmd_unified_protokoll_open(
+        "imsg", {"sender": "ronny"}, "projekt", "sitzung-2026-08-10"
+    )
+    assert "sitzung-2026-08-10" in r
+    prot = a._unified_threads["projekt"]["protokoll"]
+    assert prot["name"] == "sitzung-2026-08-10"
+    assert prot["messages"] == []
+
+
+def test_protokoll_open_unknown_thread(tmp_path):
+    a = _make_adapter(tmp_path)
+    a._load_unified_threads()
+    r = a._cmd_unified_protokoll_open("imsg", {"sender": "ronny"}, "nope")
+    assert "not found" in r.lower()
+
+
+def test_protokoll_close_leader_only(tmp_path):
+    a = _make_adapter(tmp_path)
+    a._load_unified_threads()
+    a._cmd_unified_create("imsg", {"sender": "ronny", "chat": {"id": "u1"}}, "projekt")
+    a._cmd_unified_join("talk", {"sender": "anja", "chat": {"id": "t1"}}, "projekt")
+    a._cmd_unified_protokoll_open("imsg", {"sender": "ronny"}, "projekt")
+    # Nicht-Leader darf nicht schliessen
+    r = a._cmd_unified_protokoll_close("talk", {"sender": "anja"}, "projekt")
+    assert "only" in r.lower() or "leader" in r.lower()
+    assert a._unified_threads["projekt"].get("protokoll") is not None
+
+
+def test_protokoll_close_creates_artifact(tmp_path):
+    a = _make_adapter(tmp_path)
+    a._load_unified_threads()
+    a._cmd_unified_create("imsg", {"sender": "ronny", "chat": {"id": "u1"}}, "projekt")
+    a._cmd_unified_protokoll_open("imsg", {"sender": "ronny"}, "projekt", "sitzung")
+    r = a._cmd_unified_protokoll_close("imsg", {"sender": "ronny"}, "projekt")
+    assert "closed" in r.lower() or "artifact" in r.lower()
+    # Artefakt-Datei existiert
+    assert (a._bridge_dir / "protokoll" / "projekt" / "sitzung.md").exists()
+    # protokoll-State nach close gelöscht
+    assert a._unified_threads["projekt"].get("protokoll") is None
+
+
+def test_protokoll_close_without_open(tmp_path):
+    a = _make_adapter(tmp_path)
+    a._load_unified_threads()
+    a._cmd_unified_create("imsg", {"sender": "ronny", "chat": {"id": "u1"}}, "projekt")
+    r = a._cmd_unified_protokoll_close("imsg", {"sender": "ronny"}, "projekt")
+    assert "no" in r.lower() or "not" in r.lower() or "open" in r.lower()
+
+
+def test_protokoll_command_open_via_process_incoming(tmp_path):
+    a = _make_adapter(tmp_path)
+    a._extra["allow_all"] = "true"
+    a._load_unified_threads()
+    a._cmd_unified_create("imsg", {"sender": "ronny", "chat": {"id": "u1"}}, "projekt")
+    a._send_reply = AsyncMock()
+    a.handle_message = AsyncMock()
+
+    async def run():
+        await a._process_incoming(
+            "imsg",
+            {
+                "sender": "ronny",
+                "text": "/unified protokoll open projekt sitzung",
+                "chat": {"id": "u1", "type": "direct"},
+            },
+            tmp_path / "x.json",
+        )
+
+    asyncio.run(run())
+    a.handle_message.assert_not_awaited()
+    a._send_reply.assert_awaited_once()
+    a._load_unified_threads()
+    assert a._unified_threads["projekt"]["protokoll"]["name"] == "sitzung"
+
+
+def test_protokoll_command_help_lists_lifecycle(tmp_path):
+    a = _make_adapter(tmp_path)
+    a._load_unified_threads()
+    text = a._unified_help_text()
+    assert "protokoll" in text.lower()
+    assert "open" in text
+    assert "close" in text

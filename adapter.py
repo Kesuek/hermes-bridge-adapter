@@ -544,10 +544,42 @@ class BridgeAdapter(BasePlatformAdapter):
             "leave": self._cmd_unified_leave,
             "members": self._cmd_unified_members,
             "mode": self._cmd_unified_mode,
+            "protokoll": None,
         }
         handler = dispatch.get(sub)
         if sub == "help":
             await self._send_reply(bridge, data, self._unified_help_text())
+        elif sub == "protokoll":
+            # /unified protokoll open <thread> [sitzung]
+            # /unified protokoll close <thread>
+            action = args[0] if args else ""
+            name = args[1] if len(args) > 1 else ""
+            if action == "open":
+                sitzung = args[2] if len(args) > 2 else ""
+                if not name:
+                    await self._send_reply(
+                        bridge, data, "Usage: /unified protokoll open <name> [sitzung]"
+                    )
+                else:
+                    await self._send_reply(
+                        bridge, data,
+                        self._cmd_unified_protokoll_open(bridge, data, name, sitzung),
+                    )
+            elif action == "close":
+                if not name:
+                    await self._send_reply(
+                        bridge, data, "Usage: /unified protokoll close <name>"
+                    )
+                else:
+                    await self._send_reply(
+                        bridge, data,
+                        self._cmd_unified_protokoll_close(bridge, data, name),
+                    )
+            else:
+                await self._send_reply(
+                    bridge, data,
+                    "Usage: /unified protokoll <open|close> <name> [sitzung]",
+                )
         elif handler is None:
             await self._send_reply(
                 bridge, data,
@@ -608,6 +640,8 @@ class BridgeAdapter(BasePlatformAdapter):
             "  /unified leave <name>       — leave a unified thread\n"
             "  /unified members <name>     — list members of a thread\n"
             "  /unified mode <name> <mode> — set mode (participant | reactive | silent | protokoll)\n"
+            "  /unified protokoll open <name> [sitzung] — open a protokoll session (leader-only)\n"
+            "  /unified protokoll close <name>         — close + write the protokoll artifact (leader-only)\n"
             "  /unified help                — this help\n\n"
             "Members share one agent session across bridges. Reply to a "
             "thread with the address unified~<name> (multicast to all members)."
@@ -688,6 +722,114 @@ class BridgeAdapter(BasePlatformAdapter):
         thread["mode"] = mode
         self._save_unified_threads()
         return f"Mode of '{name}' set to '{mode}'."
+
+    # ── protokoll lifecycle (T-059) ──────────────────────────────────
+
+    def _protokoll_dir(self, thread_name: str) -> Path:
+        """Directory where protokoll artifacts are stored: <bridge_dir>/protokoll/<thread>/."""
+        return self._bridge_dir / "protokoll" / thread_name if self._bridge_dir else Path()
+
+    def _cmd_unified_protokoll_open(
+        self, bridge: str, data: dict, name: str, sitzung: str = ""
+    ) -> str:
+        """Open a protokoll session (leader-only).
+
+        ``/unified protokoll open <thread> [sitzung]`` — the sender must be
+        the thread leader (``created_by``). Records an active ``protokoll``
+        state on the thread that the inbound path appends messages to.
+        The session name defaults to the thread name.
+        """
+        thread = self._unified_threads.get(name)
+        if not thread:
+            return f"Unified thread '{name}' not found."
+        sender = data.get("sender", "")
+        if sender != thread.get("created_by", ""):
+            return "Protokoll is leader-only. Only the thread creator can open a session."
+        sitzung_name = sitzung or name
+        thread["protokoll"] = {
+            "name": sitzung_name,
+            "opened_at": _now_iso(),
+            "opened_by": sender,
+            "messages": [],
+        }
+        thread["mode"] = "protokoll"
+        self._save_unified_threads()
+        return (
+            f"Protokoll session '{sitzung_name}' opened for '{name}'. "
+            f"Incoming messages are collected; close with "
+            f"/unified protokoll close {name}."
+        )
+
+    def _cmd_unified_protokoll_close(
+        self, bridge: str, data: dict, name: str
+    ) -> str:
+        """Close the protokoll session and write the artifact (leader-only).
+
+        Renders the collected messages as Markdown under
+        ``<bridge_dir>/protokoll/<thread>/<sitzung>.md`` and clears the
+        live ``protokoll`` state. If no session is open, replies with a
+        hint instead.
+        """
+        thread = self._unified_threads.get(name)
+        if not thread:
+            return f"Unified thread '{name}' not found."
+        sender = data.get("sender", "")
+        if sender != thread.get("created_by", ""):
+            return "Protokoll is leader-only. Only the thread creator can close a session."
+        prot = thread.get("protokoll")
+        if not prot:
+            return (
+                f"No open protokoll session for '{name}'. "
+                f"Open one with /unified protokoll open {name}."
+            )
+        # Write the artifact (Markdown).
+        sitzung_name = prot.get("name", name)
+        out_dir = self._protokoll_dir(name)
+        try:
+            out_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            return f"Failed to create protokoll dir: {e}"
+        lines = [
+            f"# Protokoll: {sitzung_name}",
+            "",
+            f"- Thread: {name}",
+            f"- Opened: {prot.get('opened_at', '')}",
+            f"- Closed: {_now_iso()}",
+            f"- Leader: {prot.get('opened_by', sender)}",
+            "",
+            "## Verlauf",
+            "",
+        ]
+        msgs = prot.get("messages", [])
+        if not msgs:
+            lines.append("_Keine Nachrichten gesammelt._")
+            lines.append("")
+            lines.append(
+                "> Hinweis: Diese Sitzung wurde nachträglich angelegt. Die "
+                "Zusammenfassung der Historie übernimmt der Agent auf Anforderung."
+            )
+            lines.append("")
+        else:
+            for m in msgs:
+                ts = m.get("ts", "")
+                who = m.get("sender_name") or m.get("sender", "")
+                lines.append(f"### {ts} — {who}")
+                lines.append("")
+                lines.append(m.get("text", ""))
+                lines.append("")
+        artifact = out_dir / f"{sitzung_name}.md"
+        try:
+            artifact.write_text("\n".join(lines), "utf-8")
+        except OSError as e:
+            return f"Failed to write protokoll artifact: {e}"
+        # Clear the live state and revert to participant mode.
+        thread["protokoll"] = None
+        thread["mode"] = "participant"
+        self._save_unified_threads()
+        return (
+            f"Protokoll session '{sitzung_name}' closed. "
+            f"Artifact: {artifact}"
+        )
 
     # ── Polling ─────────────────────────────────────────────────────
 
