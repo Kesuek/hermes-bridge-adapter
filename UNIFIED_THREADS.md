@@ -18,14 +18,15 @@ The gateway builds the session key `agent:main:bridge_adapter:thread:unified:<na
 
 ## `/unified` commands
 
-A message starting with `/unified` is parsed by the adapter as a command (it never reaches the agent). Commands are sent from any member bridge's `inbox/` like a normal message:
+A message starting with `/unified` (or the shorthand `/u`) is parsed by the adapter as a command (it never reaches the agent). Commands are sent from any member bridge's `inbox/` like a normal message. The `/u` alias supports per-command shortcuts: `c`→create, `j`→join, `l`→leave, `x`→exit, `m`→mode, `s`→switch, `st`→status, `me`→members, `d`→send, `h`/`?`→help. E.g. `/u c Team1` == `/unified create Team1`.
 
 | Command | Description |
 |---------|-------------|
 | `/unified create <name>` | Create a thread; the sender becomes the first member (and the **leader**) |
 | `/unified status` | List all threads + member count + mode |
 | `/unified join <name>` | Join an existing thread |
-| `/unified leave <name>` | Leave a thread |
+| `/unified leave <name>` | Leave a thread (remove membership) |
+| `/unified exit [name]` | **Pause** routing out of the thread — your messages from its chats go back to the normal per-bridge chat (own agent session, not the shared one). You stay a member. `switch`/`join` re-enter. (T-068) |
 | `/unified members <name>` | List the members of a thread |
 | `/unified mode <name> <mode>` | Set the mode — `participant` / `reactive` / `off` / `silent` / `protokoll` |
 | `/unified switch <name>` | Set this thread as your **active thread** — your messages route here (T-064) |
@@ -77,6 +78,25 @@ A user with multiple unified threads picks one as their **active thread** via `/
 - **No mode interaction** — the message is written directly to the outbox; it does not pass through the adaptive buffer or mode gating (those apply to *inbound* dispatch, this is *outbound*).
 - **Use case** — reply to a thread from a context where you don't want to switch (e.g. a quick ping from another bridge), or send as a one-off without committing.
 
+## Exit / paused routing (T-068)
+
+`/unified exit [name]` **pauses** the sender's routing out of a unified thread. It is distinct from `leave`:
+
+- **`leave`** removes the user from the thread's `members` — they no longer see it at all and must re-join.
+- **`exit`** keeps the user a member but **stops routing their messages** from the thread's chats into the shared unified session. Their messages from a member chat go to the **normal per-bridge chat** — their own agent session, not the shared thread session.
+
+This is what you want when a chat is physically mapped as a thread member (so `_find_unified_for_member` would otherwise catch every message) but you want to switch back to writing a direct DM with the agent without leaving the team.
+
+```
+<bridge_dir>/paused_threads.json
+{ "ronny": ["Team1"], "anja": [] }
+```
+
+- **Routing** — in `_process_incoming`, after the membership lookup finds the thread, the adapter checks the sender's paused set. If the thread is paused, the message is **not** routed into `unified~<name>` — it falls through to the normal per-bridge chat.
+- **Re-enter** — `/unified switch <name>` and `/unified join <name>` both **unpause** the thread.
+- **Scope** — `/unified exit` with no name pauses *all* threads the person is a member of; with a name it pauses just that thread.
+- **Persists across restarts** — `paused_threads.json` is loaded on `connect()` and rewritten on every `exit`/`switch`/`join`.
+
 ## Message-Relay (T-063)
 
 In a Unified Thread, an incoming message from one member is **mirrored to the outbox of every other member bridge** — so all human participants see the full conversation across messenger boundaries, like a team chat across iMessage, Talk, and any other wrapper. The agent still receives the original message (it stays in context); the relay is **additional**, for the humans.
@@ -110,13 +130,7 @@ Every thread has a `mode` field (default `participant`) that controls how the ad
 
 ### Leader marking
 
-The thread creator (`created_by`) is the thread's **leader**. The routing-context line the adapter appends to every unified-thread message marks the leader explicitly:
-
-```
-Message from ronny, bridge imsg, unified thread 'projekt' (2 members), reply to unified~projekt [Ronny Leader]
-```
-
-Non-leader messages carry the same line without the `[<Name> Leader]` suffix.
+The thread creator (`created_by`) is the thread's **leader**. The `protokoll` lifecycle (below) is restricted to the leader; non-leader attempts are rejected. (Note: the routing-context line the adapter appends no longer marks the leader explicitly — since T-066 it uses the **unified handle** instead of the raw bridge identity and names the source bridge: `Message from Kesuek over talk~, unified thread 'Team1', reply to unified~Team1`.)
 
 ### Protokoll lifecycle
 
@@ -237,6 +251,8 @@ Unified threads are persisted in `<bridge_dir>/unified_threads.json`:
 Members are keyed by `{bridge}:{chat_id}` (the first address a person joined from). The file is loaded on `connect()` and rewritten on every mutating command, so threads survive a gateway restart. While a protokoll session is open, `protokoll` holds `{name, opened_at, opened_by, messages: [...]}`; after `close` it reverts to `null`. The `_adaptive` block (T-061) tracks the per-thread state-machine state and message buffer.
 
 The **active thread** map (T-064) lives in a separate file, `<bridge_dir>/active_threads.json` (`{person → thread_name}`), also loaded on `connect()` and rewritten on every `/unified switch`.
+
+The **paused threads** (T-068) live in `<bridge_dir>/paused_threads.json` (`{person → [thread_names]}`), loaded on `connect()` and rewritten on every `/unified exit` / `switch` / `join`.
 
 The **pending identity claims** (T-065) live in `<bridge_dir>/pending_claims.json` (`{claim_id → {code, source, target, expires}}`), loaded on `connect()` and rewritten on every `claim`/`confirm`. The **usernames** (T-065) live in `<bridge_dir>/usernames.json` (`{person → display_name}`), loaded on `connect()` and rewritten on every `/unified set username`. The **identity map** is now also written programmatically (`_save_identity_map`, atomic write) when a claim is confirmed — previously it was hand-edit only.
 
