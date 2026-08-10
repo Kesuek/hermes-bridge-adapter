@@ -904,6 +904,7 @@ class BridgeAdapter(BasePlatformAdapter):
             "status": self._cmd_unified_status,
             "join": self._cmd_unified_join,
             "leave": self._cmd_unified_leave,
+            "exit": self._cmd_unified_exit,
             "members": self._cmd_unified_members,
             "mode": self._cmd_unified_mode,
             "switch": self._cmd_unified_switch,
@@ -1022,6 +1023,8 @@ class BridgeAdapter(BasePlatformAdapter):
                 await self._send_reply(bridge, data, "Usage: /unified leave <name>")
             else:
                 await self._send_reply(bridge, data, self._cmd_unified_leave(bridge, data, name))
+        elif sub == "exit":
+            await self._send_reply(bridge, data, self._cmd_unified_exit(bridge, data))
         elif sub == "members":
             name = args[0] if args else ""
             if not name:
@@ -1070,18 +1073,22 @@ class BridgeAdapter(BasePlatformAdapter):
     @staticmethod
     def _unified_help_text() -> str:
         return (
-            "Unified Threads — commands:\n"
-            "  /unified create <name>     — create a new unified thread\n"
-            "  /unified status             — list all threads you're in\n"
-            "  /unified join <name>        — join a unified thread\n"
-            "  /unified leave <name>       — leave a unified thread\n"
-            "  /unified members <name>     — list members of a thread\n"
-            "  /unified mode <name> <mode> — set mode (participant | reactive | off | silent | protokoll)\n"
-            "  /unified switch <name>     — set this thread as your active one (your messages route here)\n"
-            "  /unified send <name> <msg> — one-shot send to a thread (multicast, no switch)\n"
-            "  /unified protokoll open <name> [sitzung] — open a protokoll session (leader-only)\n"
-            "  /unified protokoll close <name>         — close + write the protokoll artifact (leader-only)\n"
-            "  /unified help                — this help\n\n"
+            "Unified Threads — commands (alias /u, e.g. /u c = /unified create):\n"
+            "  create <name>              — create a new unified thread\n"
+            "  join <name>                — join a unified thread\n"
+            "  leave <name>               — leave a unified thread (remove membership)\n"
+            "  switch <name>              — set this thread as your active one (your messages route here)\n"
+            "  exit                       — leave the unified session, back to normal chat\n"
+            "  send <name> <msg>          — one-shot send to a thread (multicast, no switch)\n"
+            "  members <name>             — list members of a thread\n"
+            "  status                     — list all threads you're in\n"
+            "  mode <name> <mode>         — set mode (participant | reactive | off | silent | protokoll)\n"
+            "  set username <name>        — set your display name in unified threads\n"
+            "  identity claim <bridge>~<target> — claim you are also that identity\n"
+            "  identity confirm <code>    — confirm a claim with the code\n"
+            "  protokoll open <name> [sitzung] — open a protokoll session (leader-only)\n"
+            "  protokoll close <name>     — close + write the protokoll artifact (leader-only)\n"
+            "  help                       — this help\n\n"
             "Members share one agent session across bridges. Reply to a "
             "thread with the address unified~<name> (multicast to all members)."
         )
@@ -1194,6 +1201,21 @@ class BridgeAdapter(BasePlatformAdapter):
         del thread["members"][key]
         self._save_unified_threads()
         return f"Left unified thread '{name}'."
+
+    def _cmd_unified_exit(self, bridge: str, data: dict, name: str = "") -> str:
+        """Leave the unified session and return to normal chat (T-067).
+
+        Clears the user's active thread so their messages no longer route
+        into a unified thread — they go back to the normal per-bridge chat.
+        Does NOT remove them as a member (that's `leave`); it only stops the
+        active-thread mapping.
+        """
+        person = self._resolve_identity(bridge, data.get("sender", ""))
+        if person not in self._active_threads:
+            return "You are not in a unified session. Use /unified switch <name> to enter one."
+        del self._active_threads[person]
+        self._save_active_threads()
+        return "Exited the unified session. Your messages now go to the normal chat."
 
     def _cmd_unified_mode(self, bridge: str, data: dict, name: str, mode: str) -> str:
         """Set the mode of a unified thread (T-059 implements the logic)."""
@@ -1598,7 +1620,26 @@ class BridgeAdapter(BasePlatformAdapter):
 
         # /unified commands (T-058): treat as adapter command, not a normal
         # message. Parsed and dispatched here so they never reach the agent.
-        if text.strip().startswith("/unified"):
+        # Alias: /u <sub> is shorthand for /unified <sub> (T-067).
+        stripped = text.strip()
+        if stripped.startswith("/unified") or stripped.startswith("/u "):
+            if stripped.startswith("/u "):
+                # normalize /u c Team1 → /unified create Team1
+                # (subcommand aliases: c→create, j→join, l→leave, x→exit,
+                #  m→mode, s→switch, st→status, me→members, d→send)
+                alias_text = stripped[3:].strip()
+                parts2 = alias_text.split()
+                sub = parts2[0] if parts2 else "help"
+                sub_aliases = {
+                    "c": "create", "j": "join", "l": "leave", "x": "exit",
+                    "m": "mode", "s": "switch", "st": "status",
+                    "me": "members", "d": "send", "h": "help",
+                }
+                mapped = sub_aliases.get(sub, sub)
+                rest = " ".join(parts2[1:]) if len(parts2) > 1 else ""
+                text = f"/unified {mapped} {rest}".strip()
+                data = dict(data)
+                data["text"] = text
             await self._handle_unified_command(bridge, data, filepath)
             return
 

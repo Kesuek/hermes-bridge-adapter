@@ -356,10 +356,15 @@ def test_unified_help_lists_commands(tmp_path):
     a = _make_adapter(tmp_path)
     a._load_unified_threads()
     text = a._unified_help_text()
-    assert "/unified create" in text
-    assert "/unified join" in text
-    assert "/unified mode" in text
+    # The help lists subcommands (the /unified prefix is stated once in the
+    # header, not repeated per line).
+    assert "create <name>" in text
+    assert "join <name>" in text
+    assert "exit" in text
+    assert "mode <name>" in text
     assert "participant" in text
+    assert "set username" in text
+    assert "identity claim" in text
 
 
 def test_unified_mode_sets_field(tmp_path):
@@ -1094,6 +1099,41 @@ def test_relay_dedup_same_person_two_bridges(tmp_path):
     # ronny is on talk (1 address) → exactly 1 talk outbox file
     talk_files = list((a._bridge_dir / "outbox" / "talk").glob("*.json"))
     assert len(talk_files) == 1, "relay must dedup same address, not same person"
+
+
+def test_unified_exit_clears_active_thread(tmp_path):
+    a = _make_adapter(tmp_path)
+    a._load_unified_threads()
+    a._load_active_threads()
+    a._cmd_unified_create("imsg", {"sender": "ronny", "chat": {"id": "u1"}}, "projekt")
+    a._cmd_unified_switch("imsg", {"sender": "ronny"}, "projekt")
+    assert a._active_threads["ronny"] == "projekt"
+    result = a._cmd_unified_exit("imsg", {"sender": "ronny"})
+    assert "exited" in result.lower()
+    assert "ronny" not in a._active_threads
+
+
+def test_unified_alias_u_shortcut(tmp_path):
+    from unittest.mock import AsyncMock
+    a = _make_adapter(tmp_path)
+    a._extra["allow_all"] = "true"
+    a._load_unified_threads()
+    a.handle_message = AsyncMock()
+    inbox_file = tmp_path / "bridge" / "inbox" / "imsg" / "alias.json"
+    inbox_file.parent.mkdir(parents=True, exist_ok=True)
+    inbox_file.write_text("{}", encoding="utf-8")
+
+    async def run():
+        await a._process_incoming(
+            "imsg",
+            {"sender": "ronny", "text": "/u c aliasthread",
+             "chat": {"id": "u1", "type": "direct"}},
+            inbox_file,
+        )
+    asyncio.run(run())
+    # /u c → /unified create → thread created, not dispatched to agent.
+    a.handle_message.assert_not_awaited()
+    assert "aliasthread" in a._unified_threads
 
 
 def test_silent_flush_timer_dispatches_due_digest(tmp_path):
