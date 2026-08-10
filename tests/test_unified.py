@@ -1052,3 +1052,26 @@ def test_inbound_relays_to_other_members(tmp_path):
     assert talk_files, "relay should write to talk outbox"
     data = json.loads(talk_files[0].read_text("utf-8"))
     assert "[Ronny]" in data["text"]
+
+
+def test_relay_dedup_same_person_two_bridges(tmp_path):
+    """T-063 Task 4: relay dedups per (bridge, chat_id), not per person.
+
+    A person who joined from two bridges still receives the message on each
+    of their addresses (multicast); the dedup guarantees the SAME address
+    is never written twice.
+    """
+    a = _make_adapter(tmp_path)
+    a._load_unified_threads()
+    a._identity_map = {"ronny": ["ronny.pietschke@icloud.com", "ronny"]}
+    a._cmd_unified_create(
+        "imsg",
+        {"sender": "ronny.pietschke@icloud.com", "chat": {"id": "u1"}},
+        "projekt",
+    )
+    # same person joins from talk → merges into the one member (T-062)
+    a._cmd_unified_join("talk", {"sender": "ronny", "chat": {"id": "t1"}}, "projekt")
+    asyncio.run(a._relay_to_other_members("projekt", "imsg", "Ronny", "Hallo"))
+    # ronny is on talk (1 address) → exactly 1 talk outbox file
+    talk_files = list((a._bridge_dir / "outbox" / "talk").glob("*.json"))
+    assert len(talk_files) == 1, "relay must dedup same address, not same person"
