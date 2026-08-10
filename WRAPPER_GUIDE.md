@@ -423,7 +423,7 @@ def write_unified_command(sender, chat_id, command_text):
     )
 ```
 
-Available commands: `create <name>`, `status`, `join <name>`, `leave <name>`, `members <name>`, `mode <name> <mode>`, `help`.
+Available commands: `create <name>`, `status`, `join <name>`, `leave <name>`, `members <name>`, `mode <name> <mode>`, `protokoll open <name> [sitzung]`, `protokoll close <name>`, `help`.
 
 ### Delivering multicast replies
 
@@ -453,9 +453,40 @@ When the agent replies to `unified~projekt`, the adapter writes one outbox JSON 
 
 So a wrapper delivering multicast replies needs **no special logic** — it keeps polling its own `outbox/<bridge>/` and delivering whatever appears there; the adapter handles the fan-out.
 
+### Teilnehmer-Modi (T-059)
+
+Each unified thread has a `mode` that controls how the adapter dispatches incoming member messages. The wrapper doesn't need to know the mode — it keeps writing to `inbox/` and reading from `outbox/` as usual; the adapter applies the mode before the agent is called.
+
+| Mode | What the wrapper sees | What the agent does |
+|------|----------------------|---------------------|
+| `participant` (default) | Normal: inbox message → agent reply in `outbox/`. The agent decides whether to reply; it emits the literal token `NO_REPLY` (suppressed by the gateway) when it has nothing to say. | Decides per message |
+| `reactive` | Only messages that mention the agent (`@hermes` or a bridge `mention_patterns` match) reach the agent. Un-mentioned messages are dropped by the adapter (no `outbox/` reply). | Replies only when mentioned |
+| `silent` | No `outbox/` reply is ever produced — the adapter drops every message. The agent keeps context via session persistence. | Never replies |
+| `protokoll` | No `outbox/` reply while a session is open — messages are collected into the adapter's `protokoll` state. On `close`, the adapter writes a Markdown artifact to `<bridge_dir>/protokoll/<thread>/<sitzung>.md`. | Does not reply while the session is open |
+
+The thread creator (`created_by`) is the thread's **leader**. The routing-context line the adapter appends to every unified-thread message marks the leader as `[<Name> Leader]`, so a wrapper that surfaces raw text to the user sees no extra difference — the marker is only visible to the agent.
+
+#### `/unified protokoll` lifecycle
+
+`protokoll` is a leader-only lifecycle for capturing a thread's conversation as an artifact (e.g. a meeting protocol). The wrapper writes the commands like any other `/unified` command; the adapter handles the rest:
+
+```python
+# Leader opens a session (mode switches to protokoll, messages start being collected)
+write_inbox(sender=leader, text="/unified protokoll open projekt sitzung-2026-08-10",
+            chat_id=leader_chat, chat_type="direct")
+
+# ... members keep chatting normally; the adapter collects, the agent stays silent ...
+
+# Leader closes the session (artifact written, mode reverts to participant)
+write_inbox(sender=leader, text="/unified protokoll close projekt",
+            chat_id=leader_chat, chat_type="direct")
+```
+
+The artifact lands at `<bridge_dir>/protokoll/projekt/sitzung-2026-08-10.md`. Only the leader may `open`/`close`; non-leader attempts get a rejection reply in their `outbox/`.
+
 ### Persistence
 
-Threads are persisted in `<bridge_dir>/unified_threads.json` (loaded on adapter start, rewritten on every mutating command). Members are keyed by `{bridge}:{chat_id}`. The wrapper does not need to read this file — it's purely adapter state.
+Threads are persisted in `<bridge_dir>/unified_threads.json` (loaded on adapter start, rewritten on every mutating command). Members are keyed by `{bridge}:{chat_id}`. The wrapper does not need to read this file — it's purely adapter state. While a protokoll session is open the thread record also holds the live `protokoll` state; after `close` it reverts to `null`.
 
 ## Configuration via Environment Variables
 

@@ -151,6 +151,7 @@ capabilities: [text]
 - **Agent awareness (T-051)** — a system-prompt platform hint teaches the agent to read `registry/` and address messages as `<bridge>~<target>`; every inbound message carries a compact routing line (`[Message from <sender>, bridge <bridge>, reply to <bridge>~<target>]`)
 - **Routing fallback (T-053)** — `send()` validates the target; unroutable targets (unknown bridge / wrong format) return a clear `SendResult` error instead of silently misrouting
 - **Unified threads (T-058)** — `/unified` commands create shared agent sessions across bridges; `unified~<name>` multicasts a reply to every member bridge
+- **Unified thread modes (T-059)** — per-thread `mode` (`participant` / `reactive` / `silent` / `protokoll`) controls dispatch behaviour; leader (`created_by`) marked as `[<Name> Leader]` in the routing context; `protokoll` lifecycle (`open`/`close`) collects messages into a Markdown artifact
 
 ## Unified Threads (T-058)
 
@@ -162,12 +163,14 @@ A message starting with `/unified` is parsed by the adapter as a command (it nev
 
 | Command | Description |
 |---------|-------------|
-| `/unified create <name>` | Create a new unified thread; the sender becomes the first member |
+| `/unified create <name>` | Create a new unified thread; the sender becomes the first member (and the **leader**) |
 | `/unified status` | List all unified threads + member count + mode |
 | `/unified join <name>` | Join an existing unified thread |
 | `/unified leave <name>` | Leave a unified thread |
 | `/unified members <name>` | List the members of a thread |
-| `/unified mode <name> <mode>` | Set the thread's mode (`participant` / `reactive` / `silent` / `protokoll`; the mode *logic* is implemented in T-059, T-058 only stores the field) |
+| `/unified mode <name> <mode>` | Set the thread's mode — `participant` / `reactive` / `silent` / `protokoll` (see [Teilnehmer-Modi](#teilnehmer-modi-t-059) below) |
+| `/unified protokoll open <name> [sitzung]` | Open a protokoll session (leader-only); starts collecting messages and sets mode to `protokoll` |
+| `/unified protokoll close <name>` | Close the protokoll session (leader-only); writes the Markdown artifact to `<bridge_dir>/protokoll/<name>/<sitzung>.md` and reverts mode to `participant` |
 | `/unified help` | Show the command list |
 
 ### Addressing a unified thread
@@ -187,6 +190,39 @@ outbox/talk/<uuid>.json   → target = talk~<chat_id>
 
 Each wrapper then delivers its copy via its own platform API, so one agent reply reaches every bridge in the thread.
 
+### Teilnehmer-Modi (T-059)
+
+Every unified thread has a `mode` field (default `participant`) that controls how the adapter dispatches incoming member messages. The adapter enforces `reactive`/`silent`/`protokoll` **deterministically before the gateway sees the message** — only `participant` lets the agent decide.
+
+| Mode | Behaviour | Set with |
+|------|-----------|----------|
+| `participant` (default) | The agent decides whether to reply. It is taught (via `platform_hint`) to emit the literal token `NO_REPLY` when it has nothing to contribute; the gateway suppresses that reply. | `/unified mode <name> participant` |
+| `reactive` | Mention-gating like a group chat: only messages that mention the agent (`@hermes`, or a bridge-specific `mention_patterns` match) are dispatched. Un-mentioned messages are dropped + the inbox file is deleted. | `/unified mode <name> reactive` |
+| `silent` | Listener: the agent never replies. All messages are dropped + the inbox file is deleted — no agent turn is triggered. The agent still keeps the thread history via session persistence, so it "reads along" when it later returns to the thread. | `/unified mode <name> silent` |
+| `protokoll` | Protocol mode: incoming messages are collected into the live protokoll session instead of dispatched. The agent does not reply while a session is open. See [Protokoll-Lifecycle](#protokoll-lifecycle). | `/unified protokoll open <name>` |
+
+> **Note:** `reactive`/`silent`/`protokoll` drop the message in the adapter — the agent never sees it on this turn. The agent's shared session still accumulates history from the turns it *does* see, so later context is preserved.
+
+#### Leader-Markierung
+
+The thread creator (`created_by`) is the thread's **leader**. The routing-context line that the adapter appends to every unified-thread message marks the leader explicitly so the agent can tell protocol leadership apart from regular members:
+
+```
+Message from ronny, bridge imsg, unified thread 'projekt' (2 members), reply to unified~projekt [Ronny Leader]
+```
+
+Non-leader messages carry the same routing line without the `[<Name> Leader]` suffix.
+
+#### Protokoll-Lifecycle
+
+`protokoll` is a leader-only lifecycle for capturing a thread's conversation as an artifact (e.g. a meeting protocol):
+
+1. **Open** — the leader runs `/unified protokoll open <name> [sitzung]`. The adapter records a live `protokoll` state on the thread (`name`, `opened_at`, `messages: []`) and switches the thread's mode to `protokoll`. From this point incoming messages are **collected** into `protokoll.messages` instead of dispatched — the agent does not reply.
+2. **Close** — the leader runs `/unified protokoll close <name>`. The adapter renders the collected messages as Markdown to `<bridge_dir>/protokoll/<name>/<sitzung>.md`, clears the live `protokoll` state, and reverts the mode to `participant`.
+3. **Retroaktiv** — closing a session that collected no messages produces a placeholder artifact noting that the session was opened after the fact; the agent can be asked to summarize the existing thread history on demand.
+
+Only the leader (`created_by`) may `open`/`close`. Non-leader attempts are rejected with a clear message. The session name defaults to the thread name when none is given.
+
 ### Persistence
 
 Unified threads are persisted in `<bridge_dir>/unified_threads.json`:
@@ -202,18 +238,20 @@ Unified threads are persisted in `<bridge_dir>/unified_threads.json`:
       "talk:t1": {"bridge": "talk", "chat_id": "t1", "user_id": "anja", "user_name": "anja", "joined_at": "..."}
     },
     "aliases": [],
-    "mode": "participant"
+    "mode": "participant",
+    "protokoll": null
   }
 }
 ```
 
-Members are keyed by `{bridge}:{chat_id}`. The file is loaded on `connect()` and rewritten on every mutating command, so threads survive a gateway restart.
+Members are keyed by `{bridge}:{chat_id}`. The file is loaded on `connect()` and rewritten on every mutating command, so threads survive a gateway restart. While a protokoll session is open, `protokoll` holds `{name, opened_at, opened_by, messages: [...]}`; after `close` it reverts to `null`.
 
 ### Notes / limits
 
 - **Auth stays framework-side.** A user not authorized on a bridge is dropped by the gateway's authz mixin before the adapter's mapping sees them — they cannot join a thread.
 - **Member dedup (T-062)** is a separate task — T-058 uses raw `{bridge}:{chat_id}` keys.
-- **Mode logic (T-059)** is a separate task — T-058 only stores the `mode` field and validates it against the four allowed values.
+- **Mention patterns** drive `reactive` mode (and group-chat gating). The default patterns match `@hermes` / `hermes agent`; a bridge can override via `mention_patterns` in its manifest / `BRIDGE_MENTION_PATTERNS`. A message is "mentioned" if any pattern matches it.
+- **`NO_REPLY` marker** is only relevant in `participant` mode — the agent emits the literal token `NO_REPLY` (or `[SILENT]`) and the gateway suppresses delivery. The other three modes drop deterministically in the adapter before the agent is ever called.
 
 ## Installation
 
