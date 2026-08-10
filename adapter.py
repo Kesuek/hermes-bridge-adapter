@@ -467,7 +467,7 @@ class BridgeAdapter(BasePlatformAdapter):
 
     # ── Unified threads (T-058) ────────────────────────────────────────
 
-    UNIFIED_MODES = ("participant", "reactive", "silent", "protokoll")
+    UNIFIED_MODES = ("participant", "reactive", "off", "silent", "protokoll")
 
     def _unified_path(self) -> Path:
         """Path to the unified_threads.json persistence file."""
@@ -739,7 +739,7 @@ class BridgeAdapter(BasePlatformAdapter):
             if not name or not mode:
                 await self._send_reply(
                     bridge, data,
-                    "Usage: /unified mode <name> <participant|reactive|silent|protokoll>",
+                    "Usage: /unified mode <name> <participant|reactive|off|silent|protokoll>",
                 )
             else:
                 await self._send_reply(
@@ -761,7 +761,7 @@ class BridgeAdapter(BasePlatformAdapter):
             "  /unified join <name>        — join a unified thread\n"
             "  /unified leave <name>       — leave a unified thread\n"
             "  /unified members <name>     — list members of a thread\n"
-            "  /unified mode <name> <mode> — set mode (participant | reactive | silent | protokoll)\n"
+            "  /unified mode <name> <mode> — set mode (participant | reactive | off | silent | protokoll)\n"
             "  /unified protokoll open <name> [sitzung] — open a protokoll session (leader-only)\n"
             "  /unified protokoll close <name>         — close + write the protokoll artifact (leader-only)\n"
             "  /unified help                — this help\n\n"
@@ -1208,15 +1208,61 @@ class BridgeAdapter(BasePlatformAdapter):
                 except OSError:
                     pass
                 return
-            if mode == "silent":
-                # Listener: the agent never replies, but keeps context via
-                # session persistence (it sees the thread history on a later
-                # return). Drop the message and the inbox file — no agent turn.
+            if mode == "off":
+                # Off: the agent gets nothing — no context, no turn. Drop
+                # the message and the inbox file. (Distinct from `silent`,
+                # which is the mute switch: the agent reads along via digest
+                # but never replies.)
                 try:
                     filepath.unlink()
                 except OSError:
                     pass
                 return
+            if mode == "silent":
+                # Silent (mute switch): the agent reads along but never
+                # replies. EVERY message is collected into a per-thread
+                # buffer and flushed periodically (digest_interval) as one
+                # bundled turn, so the agent keeps context without
+                # responding. Unlike the adaptive digest (which only bundles
+                # under high frequency), silent always buffers — it's a mute
+                # switch, not a load-shedder. (Distinct from `off`, which
+                # drops messages entirely.)
+                st = self._adaptive_state(unified_name)
+                now = time.time()
+                if st["state"] == "digesting" and now >= st["digest_until"]:
+                    # Flush the buffer as one bundled turn (agent reads along).
+                    buf = st["buffer"]
+                    buf.append({"ts": now, "sender": sender, "text": text})
+                    users = {m["sender"] for m in buf}
+                    lines = "\n".join(
+                        f"[{time.strftime('%H:%M', time.localtime(m['ts']))}] "
+                        f"[{m['sender']}] {m['text']}" for m in buf
+                    )
+                    bundle_text = (
+                        f"[System: {len(buf)} messages from "
+                        f"{len(users)} users]\n{lines}"
+                    )
+                    st["buffer"] = []
+                    st["state"] = "active"
+                    st["cooldown_until"] = now + self.ADAPTIVE_COOLDOWN
+                    self._save_unified_threads()
+                    # Dispatch the bundle so the agent reads along, but mark
+                    # it as silent so the agent knows not to reply.
+                    text = bundle_text + "\n\n[Silent digest — read only, do not reply]"
+                else:
+                    # Always buffer in silent mode (mute), regardless of
+                    # frequency. Set the digest window so a flush is due.
+                    st["state"] = "digesting"
+                    st["buffer"].append({"ts": now, "sender": sender, "text": text})
+                    st["digest_until"] = now + self.ADAPTIVE_DIGEST_INTERVAL
+                    self._save_unified_threads()
+                    try:
+                        filepath.unlink()
+                    except OSError:
+                        pass
+                    return
+                # Fall through to dispatch (the agent reads the digest but
+                # is instructed not to reply).
             if mode == "protokoll":
                 # Protocol mode: collect the message into the live session
                 # (if one is open) instead of dispatching it. If no session

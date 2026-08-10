@@ -482,15 +482,15 @@ def test_unified_reactive_passes_mentioned(tmp_path):
     a.handle_message.assert_awaited_once()
 
 
-# ── T-059 Task 3: silent mode (listener) ──────────────────────────────
+# ── T-059 Task 3: off mode (drop) + silent mode (mute/digest) ─────────
 
 
-def test_unified_silent_drops_all(tmp_path):
+def test_unified_off_drops_all(tmp_path):
     a = _make_adapter(tmp_path)
     a._extra["allow_all"] = "true"
     a._load_unified_threads()
     a._cmd_unified_create("imsg", {"sender": "ronny", "chat": {"id": "u1"}}, "projekt")
-    a._cmd_unified_mode("imsg", {"sender": "ronny"}, "projekt", "silent")
+    a._cmd_unified_mode("imsg", {"sender": "ronny"}, "projekt", "off")
     a.handle_message = AsyncMock()
     inbox_file = tmp_path / "bridge" / "inbox" / "imsg" / "m.json"
     inbox_file.parent.mkdir(parents=True, exist_ok=True)
@@ -512,8 +512,61 @@ def test_unified_silent_drops_all(tmp_path):
     assert not inbox_file.exists()
 
 
-def test_unified_silent_drops_even_when_mentioned(tmp_path):
-    """silent drops messages regardless of mentions — listener never replies."""
+def test_unified_silent_buffers_then_dispatches_digest(tmp_path):
+    """silent (mute) collects messages into the digest buffer and flushes
+    them as one bundled turn so the agent reads along but never replies."""
+    a = _make_adapter(tmp_path)
+    a._extra["allow_all"] = "true"
+    a._load_unified_threads()
+    a._cmd_unified_create("imsg", {"sender": "ronny", "chat": {"id": "u1"}}, "projekt")
+    a._cmd_unified_mode("imsg", {"sender": "ronny"}, "projekt", "silent")
+    a.handle_message = AsyncMock()
+
+    # First message: buffered (not dispatched), file deleted.
+    inbox_file = tmp_path / "bridge" / "inbox" / "imsg" / "m1.json"
+    inbox_file.parent.mkdir(parents=True, exist_ok=True)
+    inbox_file.write_text("{}", encoding="utf-8")
+
+    async def run1():
+        await a._process_incoming(
+            "imsg",
+            {"sender": "ronny", "text": "nachricht 1",
+             "chat": {"id": "u1", "type": "direct"}},
+            inbox_file,
+        )
+
+    asyncio.run(run1())
+    a.handle_message.assert_not_awaited()
+    assert not inbox_file.exists()
+    # Message is in the digest buffer.
+    st = a._unified_threads["projekt"]["_adaptive"]
+    assert any(m["text"] == "nachricht 1" for m in st["buffer"])
+
+    # Force the digest window to elapse, then a new message triggers the flush.
+    st["digest_until"] = time.time() - 1
+    inbox_file2 = tmp_path / "bridge" / "inbox" / "imsg" / "m2.json"
+    inbox_file2.write_text("{}", encoding="utf-8")
+
+    async def run2():
+        await a._process_incoming(
+            "imsg",
+            {"sender": "ronny", "text": "nachricht 2",
+             "chat": {"id": "u1", "type": "direct"}},
+            inbox_file2,
+        )
+
+    asyncio.run(run2())
+    a.handle_message.assert_awaited_once()
+    event = a.handle_message.await_args[0][0]
+    assert "[System:" in event.text
+    assert "nachricht 1" in event.text
+    assert "nachricht 2" in event.text
+    assert "do not reply" in event.text
+
+
+def test_unified_silent_buffers_even_when_mentioned(tmp_path):
+    """silent (mute) buffers messages regardless of mentions — the agent
+    reads along via digest but never replies to a direct mention."""
     a = _make_adapter(tmp_path)
     a._extra["allow_all"] = "true"
     a._load_unified_threads()
@@ -536,8 +589,12 @@ def test_unified_silent_drops_even_when_mentioned(tmp_path):
         )
 
     asyncio.run(run())
+    # Not dispatched immediately — buffered for the digest.
     a.handle_message.assert_not_awaited()
     assert not inbox_file.exists()
+    # The mention message is in the digest buffer (agent reads along).
+    st = a._unified_threads["projekt"]["_adaptive"]
+    assert any("du musst antworten" in m["text"] for m in st["buffer"])
 
 
 # ── T-059 Task 4: participant mode NO_REPLY teaching ─────────────────
