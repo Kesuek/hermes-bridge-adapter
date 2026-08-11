@@ -170,21 +170,37 @@ def build_inbox_msg(raw: dict) -> dict:
     """Build an inbox message dict from a raw imsg watch/history record."""
     attachments = []
     for att in raw.get("attachments", []):
-        src = Path(att.get("file_path", ""))
-        if src.exists():
-            target = BRIDGE_DIR / "media" / BRIDGE / "incoming" / src.name
-            target.parent.mkdir(parents=True, exist_ok=True)
-            try:
+        # imsg attachment schema uses original_path / filename / mime_type / total_bytes.
+        # (Older wrapper code read file_path/mime/size — wrong field names, so src was
+        # empty → src.name == '.' → "Is a directory" copy failure → images never arrived.)
+        # The path is on the Mac; fetch it over SCP when it isn't local.
+        remote_path = (att.get("original_path") or att.get("filename") or "").replace("~", "/Users/autologin")
+        src = Path(remote_path)
+        target = BRIDGE_DIR / "media" / BRIDGE / "incoming" / src.name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            if not src.exists():
+                # Pull from the Mac via SCP
+                scp = subprocess.run(
+                    ["scp", "-o", "ConnectTimeout=10", "-o", "StrictHostKeyChecking=no",
+                     f"{SSH_HOST}:{remote_path}", str(target)],
+                    capture_output=True, text=True, timeout=60,
+                )
+                if scp.returncode != 0:
+                    logger.warning("SCP attachment failed: %s", scp.stderr[:200])
+                    continue
+            else:
                 shutil.copy2(str(src), str(target))
-                attachments.append({
-                    "type": "image" if att.get("mime", "").startswith("image/")
-                            else "document",
-                    "url": str(target),
-                    "mime": att.get("mime", ""),
-                    "size": att.get("size", 0),
-                })
-            except OSError as e:
-                logger.warning("Failed to copy attachment: %s", e)
+            mime = att.get("mime_type") or att.get("mime") or ""
+            attachments.append({
+                "type": "image" if mime.startswith("image/")
+                        else "document",
+                "url": str(target),
+                "mime": mime,
+                "size": att.get("total_bytes") or att.get("size") or 0,
+            })
+        except OSError as e:
+            logger.warning("Failed to copy attachment: %s", e)
 
     # Raw chat identity only — the adapter builds the full reply address
     # ``imsg~<ident>`` (T-056). Keeping the bridge prefix out of chat.id
