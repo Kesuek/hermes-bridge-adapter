@@ -1398,6 +1398,43 @@ def test_identity_confirm_bruteforce_invalidates_claim(tmp_path):
     assert not a._pending_claims
 
 
+def test_identity_confirm_attempts_isolated_per_bridge(tmp_path):
+    """Review finding (2026-08-11): wrong-code attempts must not leak across
+    claims on other bridges.
+
+    Two claims are open at once: one targeting talk~ronny and one targeting
+    imsg~anja. A wrong code sent from the talk bridge must only burn attempts
+    on the talk-targeted claim — the imsg claim's attempt counter must stay
+    untouched, so a typo on one bridge cannot grief unrelated claims on
+    another.
+    """
+    from unittest.mock import AsyncMock
+    a = _make_adapter(tmp_path)
+    a._bridges = ["imsg", "talk"]
+    a._load_unified_threads()
+    a._load_pending_claims()
+    a._load_identity_map()
+    a._write_outbox = AsyncMock()
+    # Two independent claims: talk~ronny and imsg~anja.
+    asyncio.run(a._cmd_unified_identity_claim("imsg", {"sender": "ronny.pietschke@icloud.com"}, "talk~ronny"))
+    asyncio.run(a._cmd_unified_identity_claim("talk", {"sender": "anja"}, "imsg~anja"))
+    talk_claim = next(c for c in a._pending_claims.values() if c["target"] == "talk~ronny")
+    imsg_claim = next(c for c in a._pending_claims.values() if c["target"] == "imsg~anja")
+    talk_code = talk_claim["code"]
+    imsg_code = imsg_claim["code"]
+    # A wrong code from the talk bridge (targeting talk~ronny).
+    wrong = 0
+    while f"{wrong:06d}" in (talk_code, imsg_code):
+        wrong += 1
+    a._cmd_unified_identity_confirm("talk", {"sender": "ronny"}, f"{wrong:06d}")
+    # The talk claim took the hit; the imsg claim is untouched.
+    assert talk_claim["attempts"] == 1
+    assert imsg_claim["attempts"] == 0
+    # The imsg claim still confirms fine with its correct code.
+    result = a._cmd_unified_identity_confirm("imsg", {"sender": "anja"}, imsg_code)
+    assert "confirmed" in result.lower() or "merged" in result.lower()
+
+
 def test_set_username(tmp_path):
     """T-065 Task 4: /unified set username <name> sets the display name."""
     a = _make_adapter(tmp_path)

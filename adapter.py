@@ -1401,9 +1401,16 @@ class BridgeAdapter(BasePlatformAdapter):
         the pending claim is cleared.
         """
         now = time.time()
-        # Wrong-code guard: any mismatching claim gets an attempt counted;
-        # too many invalidates it (brute-force protection, review finding 2026-08-10).
+        # Wrong-code guard: a mismatching claim gets an attempt counted; too
+        # many invalidates it (brute-force protection, review finding 2026-08-10).
+        # Attempts are only counted against claims whose TARGET bridge matches
+        # the sender's bridge — a wrong code from one bridge must not burn
+        # attempts on unrelated claims on other bridges (review finding
+        # 2026-08-11: cross-claim griefing).
         for claim_id, claim in list(self._pending_claims.items()):
+            target_bridge, _, _ = claim["target"].partition("~")
+            if target_bridge != bridge:
+                continue
             if claim.get("attempts", 0) >= self.IDENTITY_CONFIRM_MAX_ATTEMPTS:
                 # Already brute-forced → drop it before checking the code.
                 del self._pending_claims[claim_id]
