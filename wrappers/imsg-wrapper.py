@@ -173,14 +173,15 @@ def build_inbox_msg(raw: dict) -> dict:
         # imsg attachment schema uses original_path / filename / mime_type / total_bytes.
         # (Older wrapper code read file_path/mime/size — wrong field names, so src was
         # empty → src.name == '.' → "Is a directory" copy failure → images never arrived.)
-        # The path is on the Mac; fetch it over SCP when it isn't local.
-        remote_path = (att.get("original_path") or att.get("filename") or "").replace("~", "/Users/autologin")
+        # The path is on the remote Mac; keep the leading "~" — scp expands it
+        # server-side to the SSH user's home, so no remote username is hardcoded.
+        remote_path = att.get("original_path") or att.get("filename") or ""
         src = Path(remote_path)
         target = BRIDGE_DIR / "media" / BRIDGE / "incoming" / src.name
         target.parent.mkdir(parents=True, exist_ok=True)
         try:
             if not src.exists():
-                # Pull from the Mac via SCP
+                # Pull from the Mac via SCP; "~" expands to the remote home.
                 scp = subprocess.run(
                     ["scp", "-o", "ConnectTimeout=10", "-o", "StrictHostKeyChecking=no",
                      f"{SSH_HOST}:{remote_path}", str(target)],
