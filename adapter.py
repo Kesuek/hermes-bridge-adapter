@@ -2438,13 +2438,30 @@ class BridgeAdapter(BasePlatformAdapter):
             )
 
     def _resolve_media_path(self, raw_path: str) -> Optional[Path]:
-        """Resolve a (possibly relative) attachment path to an absolute path."""
+        """Resolve a (possibly relative) attachment path to an absolute path.
+
+        Security (T-069): the resolved path is canonicalized and must stay
+        under ``bridge_dir``. Absolute paths and ``../``-traversal that escape
+        the bridge directory are rejected (return None) so a crafted
+        ``attachments.path`` like ``../../etc/passwd`` cannot be read.
+        """
+        if not self._bridge_dir:
+            return None
+        bridge_root = self._bridge_dir.resolve()
         p = Path(raw_path)
         if p.is_absolute():
-            return p
-        if self._bridge_dir:
-            return (self._bridge_dir / raw_path).resolve()
-        return None
+            resolved = p.resolve()
+        else:
+            resolved = (self._bridge_dir / raw_path).resolve()
+        # Reject anything that escapes the bridge directory (traversal,
+        # absolute path pointing elsewhere, symlink out of the tree).
+        if not resolved.is_relative_to(bridge_root):
+            logger.warning(
+                "Rejecting attachment path outside bridge dir: %s (resolved: %s)",
+                raw_path, resolved,
+            )
+            return None
+        return resolved
 
     def _copy_to_media_dir(
         self, bridge: str, source_path: str, msg_id: str, direction: str
@@ -2453,26 +2470,43 @@ class BridgeAdapter(BasePlatformAdapter):
 
         Returns the **relative** path (from bridge dir) on success, or None
         if the source file doesn't exist or can't be copied.
+
+        Security (T-070): the source path is canonicalized and must stay under
+        ``bridge_dir`` — a crafted ``source_path`` (e.g. from an outbox
+        message) cannot copy arbitrary files from outside the bridge tree.
         """
+        if not self._bridge_dir:
+            return None
+        bridge_root = self._bridge_dir.resolve()
         source = Path(source_path)
-        if not source.exists():
+        if source.is_absolute():
+            source_resolved = source.resolve()
+        else:
+            source_resolved = (self._bridge_dir / source_path).resolve()
+        if not source_resolved.is_relative_to(bridge_root):
+            logger.warning(
+                "Rejecting copy source outside bridge dir: %s (resolved: %s)",
+                source_path, source_resolved,
+            )
+            return None
+        if not source_resolved.exists():
             logger.warning("Cannot copy attachment: %s does not exist", source_path)
             return None
 
         target_dir = self._bridge_dir / "media" / bridge / direction
         target_dir.mkdir(parents=True, exist_ok=True)
 
-        ext = source.suffix or ""
-        target_name = f"{msg_id}-{source.stem}{ext}"
+        ext = source_resolved.suffix or ""
+        target_name = f"{msg_id}-{source_resolved.stem}{ext}"
         target = target_dir / target_name
 
         try:
-            shutil.copy2(str(source), str(target))
+            shutil.copy2(str(source_resolved), str(target))
             rel = target.relative_to(self._bridge_dir)
-            logger.debug("Copied attachment: %s → %s", source, target)
+            logger.debug("Copied attachment: %s → %s", source_resolved, target)
             return str(rel)
         except OSError as e:
-            logger.error("Failed to copy attachment %s: %s", source, e)
+            logger.error("Failed to copy attachment %s: %s", source_resolved, e)
             return None
 
     # ── Bridge helpers ───────────────────────────────────────────────

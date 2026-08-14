@@ -639,3 +639,59 @@ def test_standalone_send_empty_chat_id_fails(tmp_path):
     res = asyncio.run(_standalone_send(pconfig, "", "Hallo"))
     assert res.get("success") is not True
     assert "empty" in res.get("error", "").lower()
+
+
+# ── Security: media path traversal (T-069 / T-070) ───────────────────
+
+
+def test_resolve_media_path_rejects_traversal(tmp_path):
+    """A crafted relative path with ../ escaping bridge_dir is rejected."""
+    a = _make_adapter(tmp_path)
+    # Create a sensitive file OUTSIDE the bridge dir.
+    secret = tmp_path / "secret.txt"
+    secret.write_text("top-secret", encoding="utf-8")
+    # ../ from bridge_dir/... points at tmp_path/secret.txt
+    result = a._resolve_media_path("../secret.txt")
+    assert result is None
+
+
+def test_resolve_media_path_rejects_absolute_outside(tmp_path):
+    """An absolute path pointing outside bridge_dir is rejected."""
+    a = _make_adapter(tmp_path)
+    secret = tmp_path / "secret.txt"
+    secret.write_text("top-secret", encoding="utf-8")
+    result = a._resolve_media_path(str(secret))
+    assert result is None
+
+
+def test_resolve_media_path_accepts_inside(tmp_path):
+    """A path inside bridge_dir resolves normally."""
+    a = _make_adapter(tmp_path)
+    media = a._bridge_dir / "media" / "imsg" / "incoming"
+    media.mkdir(parents=True)
+    f = media / "pic.jpg"
+    f.write_text("img", encoding="utf-8")
+    result = a._resolve_media_path("media/imsg/incoming/pic.jpg")
+    assert result is not None
+    assert result == f.resolve()
+
+
+def test_copy_to_media_dir_rejects_traversal(tmp_path):
+    """_copy_to_media_dir refuses to copy a source outside bridge_dir."""
+    a = _make_adapter(tmp_path)
+    secret = tmp_path / "secret.txt"
+    secret.write_text("top-secret", encoding="utf-8")
+    rel = a._copy_to_media_dir("imsg", str(secret), "abc123", "outgoing")
+    assert rel is None
+
+
+def test_copy_to_media_dir_accepts_inside(tmp_path):
+    """_copy_to_media_dir copies a source inside bridge_dir."""
+    a = _make_adapter(tmp_path)
+    src = a._bridge_dir / "media" / "imsg" / "incoming"
+    src.mkdir(parents=True)
+    f = src / "doc.pdf"
+    f.write_text("pdf", encoding="utf-8")
+    rel = a._copy_to_media_dir("imsg", "media/imsg/incoming/doc.pdf", "abc123", "outgoing")
+    assert rel is not None
+    assert (a._bridge_dir / rel).exists()
