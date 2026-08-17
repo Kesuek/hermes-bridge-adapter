@@ -898,6 +898,44 @@ def test_reply_map_registers_inbound(tmp_path):
     assert any(v.get("local_msg_id") == "msg_abc" for v in a._reply_map.values())
 
 
+def test_reply_map_key_is_stable_and_resolvable(tmp_path):
+    """T-073: The reply-map key must be a stable, resolvable gateway id.
+
+    Previously the adapter let ``event.message_id`` stay ``None`` and fell
+    back to a throwaway ``uuid4()`` per registration — so the key was a
+    fresh random value that never matched a later ``reply_to``. The event
+    must now carry a non-empty ``message_id`` and the map must be keyed by
+    that exact value, so ``_resolve_reply_to(ev.message_id)`` returns the
+    bridge-local id.
+    """
+    a = _make_adapter(tmp_path)
+    a._extra["allow_all"] = "true"
+    a._load_reply_map()
+    # Capture the event that handle_message receives
+    captured = {}
+
+    async def fake_handle(event):
+        captured["event"] = event
+
+    a.handle_message = fake_handle
+
+    async def run():
+        await a._process_incoming("imsg", {
+            "sender": "ronny", "text": "Hallo", "id": "msg_abc",
+            "chat": {"id": "u1", "type": "direct"},
+        }, tmp_path / "x.json")
+
+    asyncio.run(run())
+    ev = captured["event"]
+    # The reply map must be keyed by the SAME stable id that the event
+    # carries, so a later reply_to=ev.message_id resolves to msg_abc.
+    assert ev.message_id, "event.message_id should be a stable non-empty id"
+    assert a._reply_map[ev.message_id]["local_msg_id"] == "msg_abc"
+    # And resolving a reply against that id returns the bridge-local id.
+    resolved = a._resolve_reply_to(ev.message_id)
+    assert resolved == "msg_abc"
+
+
 def test_reply_to_resolves_across_bridges(tmp_path):
     a = _make_adapter(tmp_path)
     a._load_reply_map()

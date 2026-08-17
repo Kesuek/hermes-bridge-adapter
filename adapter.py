@@ -2016,6 +2016,16 @@ class BridgeAdapter(BasePlatformAdapter):
                         "Attachment not found: %s (resolved: %s)", raw_path, abs_path
                     )
 
+        # ── Stable gateway message_id (T-073) ───────────────────────────
+        # The framework does not auto-assign a message_id for plugin-emitted
+        # events (only in the text-debounce path), so ``event.message_id``
+        # would stay ``None`` and the reply map would be keyed by a throwaway
+        # uuid4 that no later ``reply_to`` can ever match. We mint a stable,
+        # per-inbound-message id, set it on the event (so
+        # ``_reply_anchor_for_event(event)`` returns it) and register the
+        # reply map under that same value.
+        gateway_msg_id = str(uuid.uuid4())
+
         event = MessageEvent(
             text=effective_text,
             message_type=msg_type,
@@ -2024,15 +2034,16 @@ class BridgeAdapter(BasePlatformAdapter):
             media_urls=media_urls,
             media_types=media_types,
             reply_to_message_id=data.get("reply_to"),
+            message_id=gateway_msg_id,
         )
 
         # Register the gateway_msg_id → {bridge, local_msg_id} mapping so
-        # cross-bridge reply chains resolve (T-060). The gateway assigns a
-        # message_id to the event; we map it to the bridge-local id.
+        # cross-bridge reply chains resolve (T-060). The key is the SAME
+        # gateway_msg_id set on the event above, so a downstream
+        # ``reply_to=event.message_id`` resolves to the bridge-local id.
         local_id = data.get("id") or data.get("message_id") or ""
         if local_id:
-            gw_id = getattr(event, "message_id", None) or str(uuid.uuid4())
-            self._reply_map[gw_id] = {"bridge": bridge, "local_msg_id": local_id}
+            self._reply_map[gateway_msg_id] = {"bridge": bridge, "local_msg_id": local_id}
             self._save_reply_map()
 
         # Mention gating for group chats
