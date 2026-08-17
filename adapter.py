@@ -1387,7 +1387,15 @@ class BridgeAdapter(BasePlatformAdapter):
         # Send the code to the target bridge so only someone who reads that
         # bridge can confirm (challenge-response).
         await self._write_outbox(target_bridge, target, text=f"Identity claim code: {code}")
-        return f"Claim sent. Confirm with /unified identity confirm {code} from {target_bridge}."
+        # T-077: the code is the challenge secret and proves control of the
+        # *target* account. It must NOT be echoed back to the claimer — otherwise
+        # anyone who can issue a claim can confirm it themselves without ever
+        # reading the target bridge. The claimer only needs to know that a code
+        # was sent and how the target confirms it.
+        return (
+            f"Claim sent. A 6-digit code was sent to {target}. "
+            f"Have them confirm it with /unified identity confirm from {target_bridge}."
+        )
 
     def _cmd_unified_identity_confirm(
         self, bridge: str, data: dict, code: str

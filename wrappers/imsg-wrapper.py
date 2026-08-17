@@ -182,8 +182,13 @@ def build_inbox_msg(raw: dict) -> dict:
         try:
             if not src.exists():
                 # Pull from the Mac via SCP; "~" expands to the remote home.
+                # T-075: StrictHostKeyChecking=yes — the host is already in
+                # ~/.ssh/known_hosts via the main SSH path (ssh_run uses the
+                # OpenSSH default). Enforcing `yes` closes the SSH-MITM window
+                # and fails closed if the host is ever unknown (instead of
+                # silently accepting an attacker's key).
                 scp = subprocess.run(
-                    ["scp", "-o", "ConnectTimeout=10", "-o", "StrictHostKeyChecking=no",
+                    ["scp", "-o", "ConnectTimeout=10", "-o", "StrictHostKeyChecking=yes",
                      f"{SSH_HOST}:{remote_path}", str(target)],
                     capture_output=True, text=True, timeout=60,
                 )

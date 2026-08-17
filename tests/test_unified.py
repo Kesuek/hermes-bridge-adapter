@@ -1799,3 +1799,61 @@ def test_protokoll_open_strips_nested_separator(tmp_path):
         assert leaf.exists(), f"expected leaf artifact at {leaf}"
         nested = a._bridge_dir / "protokoll" / "Team1" / "sub"
         assert not nested.exists(), "nested sub dir must not be created"
+
+
+# ── T-077: Identity-Claim-Code darf nicht an den Claimer leaken ──────
+
+
+def test_identity_claim_does_not_leak_code_to_claimer(tmp_path):
+    """T-077: /unified identity claim must NOT echo the 6-digit code back to
+    the claimer.
+
+    Pre-fix the claim reply was
+    ``"Claim sent. Confirm with /unified identity confirm {code} from {target_bridge}."``
+    — the code is the challenge secret and proves control of the *target*
+    account. Sending it to the claimer defeats the challenge-response: anyone
+    who can issue a claim against a target can confirm it themselves without
+    ever reading the target bridge.
+
+    The code must reach the target only (via ``_write_outbox``). The claimer
+    reply must be code-free.
+    """
+    import re
+    a = _make_adapter(tmp_path)
+    a._bridges = ["imsg", "talk"]
+    a._load_unified_threads()
+    a._load_pending_claims()
+    a._load_identity_map()
+    # Stub the outbox write so no real file is written, but keep the call args
+    # so we can prove the target still receives the code.
+    a._write_outbox = AsyncMock()
+
+    result = asyncio.run(
+        a._cmd_unified_identity_claim(
+            "imsg", {"sender": "ronny.pietschke@icloud.com"}, "talk~ronny"
+        )
+    )
+
+    # The claimer must NOT receive the 6-digit code in the reply string.
+    codes_in_reply = re.findall(r"\b\d{6}\b", result)
+    assert not codes_in_reply, (
+        f"claim reply leaks the 6-digit code to the claimer: {result!r}"
+    )
+
+    # Sanity: the target still received the code via outbox (challenge-response
+    # intact). _write_outbox(bridge, chat_id, text=..., ...).
+    assert a._write_outbox.await_count >= 1, "claim should send a code to the target"
+    last_call = a._write_outbox.await_args
+    assert last_call.args[0] == "talk", (
+        f"code must be sent to the target bridge 'talk', got {last_call.args[0]!r}"
+    )
+    # The chat_id arg is the full target identifier as passed by the claimer.
+    assert last_call.args[1] == "talk~ronny", (
+        f"code must be sent to the target id 'talk~ronny', got {last_call.args[1]!r}"
+    )
+    sent_text = last_call.kwargs.get("text", "") or (
+        last_call.args[2] if len(last_call.args) > 2 else ""
+    )
+    assert re.search(r"\b\d{6}\b", sent_text), (
+        f"target outbox text must contain the 6-digit code: {sent_text!r}"
+    )
