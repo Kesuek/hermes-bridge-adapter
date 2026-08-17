@@ -1541,6 +1541,36 @@ class BridgeAdapter(BasePlatformAdapter):
 
     # ── protokoll lifecycle (T-059) ──────────────────────────────────
 
+    def _safe_protokoll_name(self, raw: str) -> Optional[str]:
+        """Filesystem-safe protokoll sitzung/thread leaf name (T-076).
+
+        Mirrors :meth:`_resolve_media_path`: the candidate artifact path is
+        canonicalized and must stay under ``<bridge_dir>/protokoll``; a
+        crafted ``../``-traversal (or absolute path) escapes the bridge
+        tree and is rejected (returns ``None``). The returned name is the
+        ``Path(raw).name`` basename so nested separators collapse to a
+        single leaf — the artifact always lands at
+        ``<bridge_dir>/protokoll/<thread>/<basename>.md``.
+        """
+        if not raw or not self._bridge_dir:
+            return None
+        base = self._bridge_dir / "protokoll"
+        candidate = (base / f"{raw}.md")
+        try:
+            resolved = candidate.resolve()
+        except (OSError, ValueError):
+            return None
+        if not resolved.is_relative_to(self._bridge_dir.resolve()):
+            logger.warning(
+                "Rejecting protokoll name escaping bridge dir: %r (resolved: %s)",
+                raw, resolved,
+            )
+            return None
+        leaf = Path(raw).name
+        if not leaf or leaf in (".", ".."):
+            return None
+        return leaf
+
     def _protokoll_dir(self, thread_name: str) -> Path:
         """Directory where protokoll artifacts are stored: <bridge_dir>/protokoll/<thread>/."""
         return self._bridge_dir / "protokoll" / thread_name if self._bridge_dir else Path()
@@ -1561,7 +1591,16 @@ class BridgeAdapter(BasePlatformAdapter):
         sender = data.get("sender", "")
         if sender != thread.get("created_by", ""):
             return "Protokoll is leader-only. Only the thread creator can open a session."
-        sitzung_name = sitzung or name
+        # T-076: sanitize the sitzung name BEFORE storing it. A malicious
+        # name like `../../evil` would otherwise escape the protokoll dir
+        # when the artifact is written on close.
+        raw_sitzung = sitzung or name
+        sitzung_name = self._safe_protokoll_name(raw_sitzung)
+        if sitzung_name is None:
+            return (
+                f"Invalid protokoll session name '{raw_sitzung}': name must "
+                f"not escape the protokoll directory."
+            )
         thread["protokoll"] = {
             "name": sitzung_name,
             "opened_at": _now_iso(),
@@ -1598,8 +1637,21 @@ class BridgeAdapter(BasePlatformAdapter):
                 f"No open protokoll session for '{name}'. "
                 f"Open one with /unified protokoll open {name}."
             )
-        # Write the artifact (Markdown).
-        sitzung_name = prot.get("name", name)
+        # T-076: re-sanitize the stored sitzung name (defence-in-depth —
+        # an older adapter version may have accepted a traversal name, or
+        # the persistence file may have been tampered with). The artifact
+        # path is built from this name; refuse to write if it escapes.
+        raw_sitzung = prot.get("name", name)
+        sitzung_name = self._safe_protokoll_name(raw_sitzung)
+        if sitzung_name is None:
+            logger.warning(
+                "Rejecting protokoll close with unsafe stored name %r (thread=%s)",
+                raw_sitzung, name,
+            )
+            return (
+                f"Invalid protokoll session name '{raw_sitzung}': name "
+                f"escapes the protokoll directory. Artifact not written."
+            )
         out_dir = self._protokoll_dir(name)
         try:
             out_dir.mkdir(parents=True, exist_ok=True)
@@ -1730,6 +1782,24 @@ class BridgeAdapter(BasePlatformAdapter):
                 text = f"/unified {mapped} {rest}".strip()
                 data = dict(data)
                 data["text"] = text
+            # T-074: /unified commands have OUTBOUND side effects
+            # (identity claim sends a code to an arbitrary target; protokoll
+            # writes artifacts). Unlike plain messages (the DM pairing flow
+            # must reach the gateway before any authz decision — see the
+            # comment below), these commands must NEVER run for an
+            # unauthorized sender: they would let an unapproved user push
+            # outbound traffic to any target. Gate here, before dispatch.
+            sender_id = data.get("sender", "")
+            if not self._is_user_allowed(bridge, sender_id):
+                logger.warning(
+                    "Rejecting /unified command from unauthorized sender %s "
+                    "(bridge=%s)", sender_id, bridge,
+                )
+                try:
+                    filepath.unlink()
+                except OSError:
+                    pass
+                return
             await self._handle_unified_command(bridge, data, filepath)
             return
 
@@ -2610,6 +2680,29 @@ class BridgeAdapter(BasePlatformAdapter):
         else:
             patterns = self._compile_mention_patterns(None)
         return any(p.search(text) for p in patterns)
+
+    def _is_user_allowed(self, bridge: str, user_id: str) -> bool:
+        """Authorization check for a sender on a given bridge (T-074).
+
+        Delegates to the per-bridge ``BridgeConfig.is_user_allowed`` so the
+        allow-list semantics match what the gateway framework uses for
+        normal messages. If no ``BridgeConfig`` is registered for this
+        bridge yet (e.g. the registry was reconciled out-of-band), fall
+        back to a temporary ``BridgeConfig`` built from the global extra
+        dict so the test-suite and ad-hoc setups without a manifest still
+        honour ``allow_all`` / ``allowed_users``.
+
+        This is intentionally separate from the framework authz that runs
+        inside ``handle_message``: ``/unified`` commands are dispatched
+        *before* ``handle_message`` (Z.1733) and have outbound side effects
+        (identity-claim sends a code to an arbitrary target; protokoll
+        writes artifacts). They must be gated at the dispatch point, not
+        rely on the framework gate that never runs for them.
+        """
+        bc = self._bridge_configs.get(bridge) if bridge else None
+        if bc is None:
+            bc = BridgeConfig(bridge or "", self._extra)
+        return bc.is_user_allowed(user_id)
 
     @staticmethod
     def _compile_mention_patterns(raw) -> list[re.Pattern]:

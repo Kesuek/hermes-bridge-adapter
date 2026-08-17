@@ -1567,3 +1567,235 @@ def test_relay_uses_unified_handle(tmp_path):
     assert talk_files
     data = json.loads(talk_files[0].read_text("utf-8"))
     assert "[Kesuek]" in data["text"]
+
+
+# ── T-074: /unified commands require authorized sender ───────────────
+
+
+def test_unified_command_requires_authorized_sender(tmp_path):
+    """T-074: an unauthorized sender must NOT be able to trigger outbound
+    side effects via /unified commands.
+
+    `/unified identity claim <bridge>~<target>` sends a code to an arbitrary
+    target bridge. Without the authz gate, a user that the framework would
+    never authorize (not on the allowlist, allow_all=false) could push an
+    outbound claim message to any target. The /unified dispatch happens
+    BEFORE handle_message (Z.1733), so the framework authz in
+    handle_message never runs. Gate at the dispatch point instead.
+    """
+    a = _make_adapter(tmp_path)
+    # NOT allow_all — must hit is_user_allowed and be denied.
+    a._extra["allow_all"] = "false"
+    a._extra["allowed_users"] = "ronny"
+    a._load_unified_threads()
+    a._load_pending_claims()
+    a.handle_message = AsyncMock()
+    a._send_reply = AsyncMock()
+    # Register a target bridge so the claim dispatch reaches _write_outbox.
+    reg = a._bridge_dir / "registry"
+    reg.mkdir()
+    (reg / "imsg.yaml").write_text(
+        "name: imsg\ntarget_format: [chat_id]\n", encoding="utf-8"
+    )
+    a._reconcile_registry_sync()
+
+    async def run():
+        await a._process_incoming(
+            "imsg",
+            {
+                "sender": "mallory",  # NOT authorized
+                "text": "/unified identity claim imsg~victim",
+                "chat": {"id": "m1", "type": "direct"},
+            },
+            tmp_path / "x.json",
+        )
+
+    asyncio.run(run())
+    # Mallory is not on the allowlist — the outbox must NOT contain a
+    # claim code (no outbound message to the victim).
+    files = list((a._bridge_dir / "outbox" / "imsg").glob("*.json"))
+    assert not files, "unauthorized user must not trigger outbound claim send"
+    # And no pending claim was recorded.
+    assert not a._pending_claims, "unauthorized user must not create a pending claim"
+
+
+def test_unified_command_allowed_for_authorized_sender(tmp_path):
+    """T-074 regression: the gate must NOT block an authorized sender.
+    A user on the allowlist must still be able to run /unified commands.
+    """
+    a = _make_adapter(tmp_path)
+    a._extra["allow_all"] = "false"
+    a._extra["allowed_users"] = "ronny"
+    a._load_unified_threads()
+    a._load_pending_claims()
+    a.handle_message = AsyncMock()
+    a._send_reply = AsyncMock()
+    reg = a._bridge_dir / "registry"
+    reg.mkdir()
+    (reg / "imsg.yaml").write_text(
+        "name: imsg\ntarget_format: [chat_id]\n", encoding="utf-8"
+    )
+    a._reconcile_registry_sync()
+
+    async def run():
+        await a._process_incoming(
+            "imsg",
+            {
+                "sender": "ronny",  # authorized
+                "text": "/unified identity claim imsg~victim",
+                "chat": {"id": "u1", "type": "direct"},
+            },
+            tmp_path / "x.json",
+        )
+
+    asyncio.run(run())
+    files = list((a._bridge_dir / "outbox" / "imsg").glob("*.json"))
+    assert files, "authorized user must be able to trigger outbound claim send"
+    assert a._pending_claims, "authorized user must create a pending claim"
+
+
+def test_unified_command_allowed_when_allow_all_true(tmp_path):
+    """T-074 regression: allow_all=true must keep /unified commands working
+    (the existing test suite relies on this; the gate must be a no-op there).
+    """
+    a = _make_adapter(tmp_path)
+    a._extra["allow_all"] = "true"
+    a._load_unified_threads()
+    a._load_pending_claims()
+    a.handle_message = AsyncMock()
+    a._send_reply = AsyncMock()
+    reg = a._bridge_dir / "registry"
+    reg.mkdir()
+    (reg / "imsg.yaml").write_text(
+        "name: imsg\ntarget_format: [chat_id]\n", encoding="utf-8"
+    )
+    a._reconcile_registry_sync()
+
+    async def run():
+        await a._process_incoming(
+            "imsg",
+            {
+                "sender": "mallory",
+                "text": "/unified identity claim imsg~victim",
+                "chat": {"id": "m1", "type": "direct"},
+            },
+            tmp_path / "x.json",
+        )
+
+    asyncio.run(run())
+    files = list((a._bridge_dir / "outbox" / "imsg").glob("*.json"))
+    assert files, "allow_all=true must permit /unified commands from anyone"
+
+
+# ── T-076: protokoll path-traversal sanitize ──────────────────────────
+
+
+def test_protokoll_open_rejects_path_traversal_in_sitzung(tmp_path):
+    """T-076: a malicious sitzung name with `../` must not escape the
+    protokoll directory. Open must refuse to store the unsafe name."""
+    a = _make_adapter(tmp_path)
+    a._extra["allow_all"] = "true"
+    a._load_unified_threads()
+    a._unified_threads = {
+        "Team1": {
+            "name": "Team1",
+            "created_by": "ronny",
+            "members": {},
+            "aliases": [],
+            "mode": "participant",
+            "protokoll": None,
+        }
+    }
+    a._save_unified_threads()
+    # Attempt to open with a traversal sitzung name.
+    result = a._cmd_unified_protokoll_open(
+        "imsg", {"sender": "ronny"}, "Team1", "../../evil"
+    )
+    # Must be rejected — no session stored, error reported.
+    assert "invalid" in result.lower() or "reject" in result.lower() \
+        or "unsafe" in result.lower() or "escape" in result.lower(), \
+        f"expected rejection, got: {result!r}"
+    prot = a._unified_threads["Team1"].get("protokoll")
+    assert prot is None, "traversal sitzung must not be stored on the thread"
+    # And nothing escaped the thread's protokoll directory tree.
+    root = a._bridge_dir.resolve()
+    thread_dir = (a._bridge_dir / "protokoll" / "Team1").resolve()
+    escaped = [f for f in root.rglob("*.md")
+               if not f.resolve().is_relative_to(thread_dir)]
+    assert not escaped, f"traversal wrote artifact outside thread dir: {escaped}"
+
+
+def test_protokoll_close_rejects_path_traversal_in_sitzung(tmp_path):
+    """T-076: even if a traversal name slipped into the persisted protokoll
+    state (e.g. from an older adapter version), close must refuse to write
+    the artifact outside the thread's protokoll directory."""
+    a = _make_adapter(tmp_path)
+    a._extra["allow_all"] = "true"
+    a._unified_threads = {
+        "Team1": {
+            "name": "Team1",
+            "created_by": "ronny",
+            "members": {},
+            "aliases": [],
+            "mode": "participant",
+            "protokoll": None,
+        }
+    }
+    a._save_unified_threads()
+    # Simulate a maliciously stored sitzung name (defence-in-depth: close
+    # must sanitize even when open already accepted the bad name).
+    a._unified_threads["Team1"]["protokoll"] = {
+        "name": "../../evil", "opened_at": "x", "opened_by": "ronny",
+        "messages": [],
+    }
+    a._save_unified_threads()
+    result = a._cmd_unified_protokoll_close("imsg", {"sender": "ronny"}, "Team1")
+    root = a._bridge_dir.resolve()
+    thread_dir = (a._bridge_dir / "protokoll" / "Team1").resolve()
+    # The artifact must NOT exist anywhere outside the thread's protokoll dir.
+    escaped = []
+    for f in root.rglob("*.md"):
+        if not f.resolve().is_relative_to(thread_dir):
+            escaped.append(f)
+    assert not escaped, f"traversal wrote artifact outside thread dir: {escaped}"
+    # Close must report an error rather than silently writing elsewhere.
+    assert "invalid" in result.lower() or "reject" in result.lower() \
+        or "unsafe" in result.lower() or "escape" in result.lower(), \
+        f"expected rejection, got: {result!r}"
+
+
+def test_protokoll_open_strips_nested_separator(tmp_path):
+    """T-076: a sitzung name containing a path separator (e.g. `sub/name`)
+    must collapse to its basename so the artifact stays a leaf under the
+    protokoll dir, not a nested path."""
+    a = _make_adapter(tmp_path)
+    a._extra["allow_all"] = "true"
+    a._load_unified_threads()
+    a._unified_threads = {
+        "Team1": {
+            "name": "Team1",
+            "created_by": "ronny",
+            "members": {},
+            "aliases": [],
+            "mode": "participant",
+            "protokoll": None,
+        }
+    }
+    a._save_unified_threads()
+    result = a._cmd_unified_protokoll_open(
+        "imsg", {"sender": "ronny"}, "Team1", "sub/name"
+    )
+    # Either accepted with basename-only, or rejected — both are safe. If
+    # accepted, the stored name must be the basename, and close must write
+    # under protokoll/Team1/<basename>.md (not protokoll/Team1/sub/name.md).
+    prot = a._unified_threads["Team1"].get("protokoll")
+    if prot is not None:
+        stored = prot.get("name", "")
+        assert "/" not in stored, f"stored name must be basename-only: {stored!r}"
+        r2 = a._cmd_unified_protokoll_close("imsg", {"sender": "ronny"}, "Team1")
+        assert "closed" in r2.lower() or "artifact" in r2.lower()
+        # Artifact at the leaf, no sub dir created.
+        leaf = a._bridge_dir / "protokoll" / "Team1" / f"{stored}.md"
+        assert leaf.exists(), f"expected leaf artifact at {leaf}"
+        nested = a._bridge_dir / "protokoll" / "Team1" / "sub"
+        assert not nested.exists(), "nested sub dir must not be created"
