@@ -123,6 +123,28 @@ class BridgeManifest:
         return False
 
 
+def _safe_manifest_field(value: str, field: str) -> str:
+    """Reject path traversal / separators in a manifest string field (T-072).
+
+    Manifest fields like ``service`` and ``host`` are identifiers, not
+    paths. A value with ``..`` or a path separator (``/``, ``\\``) could
+    be used to name a bridge with a traversal string that later flows into
+    filesystem construction (e.g. status/ or media/ paths built from the
+    bridge name, or downstream tools that treat ``service`` as a path).
+    Reject such values by raising ValueError so ``scan_registry`` skips
+    the manifest.
+    """
+    if not value:
+        return value
+    # Reject any path separator or traversal component.
+    if "/" in value or "\\" in value or ".." in value:
+        raise ValueError(
+            f"Manifest field {field!r} must not contain path separators or "
+            f"traversal (got {value!r})"
+        )
+    return value
+
+
 def load_manifest(data: dict) -> BridgeManifest:
     """Build a :class:`BridgeManifest` from a parsed YAML dict.
 
@@ -146,8 +168,8 @@ def load_manifest(data: dict) -> BridgeManifest:
 
     return BridgeManifest(
         name=name,
-        service=str(data.get("service", "")).strip(),
-        host=str(data.get("host", "")).strip(),
+        service=_safe_manifest_field(str(data.get("service", "")).strip(), "service"),
+        host=_safe_manifest_field(str(data.get("host", "")).strip(), "host"),
         target_format=_as_list("target_format"),
         capabilities=_as_list("capabilities"),
     )
@@ -563,6 +585,13 @@ class BridgeAdapter(BasePlatformAdapter):
 
     # ── Reply map (T-060) ────────────────────────────────────────────────
 
+    # T-078: entries older than the TTL are pruned on save so the map
+    # doesn't grow unbounded (each inbound appends, each save rewrites the
+    # whole file → O(n²) over time). A hard cap drops the oldest entries
+    # if the map still exceeds CAP after pruning (second safety net).
+    REPLY_MAP_TTL = 7 * 86400  # 7 days
+    REPLY_MAP_CAP = 5000
+
     def _reply_map_path(self) -> Path:
         """Path to the ``reply_map.json`` persistence file."""
         return self._bridge_dir / "reply_map.json" if self._bridge_dir else Path()
@@ -585,10 +614,38 @@ class BridgeAdapter(BasePlatformAdapter):
             logger.warning("Bad reply_map.json: %s", e)
 
     def _save_reply_map(self) -> None:
-        """Persist the reply map to ``reply_map.json`` (atomic write)."""
+        """Persist the reply map to ``reply_map.json`` (atomic write).
+
+        T-078: prune entries older than ``REPLY_MAP_TTL`` (default 7 days)
+        so the map doesn't grow unbounded — each inbound appends an entry
+        and each save rewrites the whole file, so an unbounded map is
+        O(n²) over time. A hard cap (``REPLY_MAP_CAP``) drops the oldest
+        entries if the map still exceeds the cap after pruning (defence
+        in depth: a flood of inbound within the TTL can't exhaust memory).
+        """
         p = self._reply_map_path()
         if not p:
             return
+        now = time.time()
+        ttl = self.REPLY_MAP_TTL
+        # T-078: prune entries older than the TTL. Entries without a ``ts``
+        # stamp (legacy data written before T-078) are kept as-is — pruning
+        # them would silently drop pre-existing reply chains. New inbound
+        # registrations always stamp ``ts`` (see _process_incoming).
+        pruned = {
+            k: v for k, v in self._reply_map.items()
+            if "ts" not in v or now - float(v.get("ts", 0)) < ttl
+        }
+        # Hard cap: if still over the limit, keep the newest CAP entries.
+        cap = self.REPLY_MAP_CAP
+        if len(pruned) > cap:
+            kept = sorted(
+                pruned.items(),
+                key=lambda kv: float(kv[1].get("ts", 0)),
+                reverse=True,
+            )[:cap]
+            pruned = dict(kept)
+        self._reply_map = pruned
         self._atomic_write_json(p, self._reply_map)
 
     def _atomic_write_json(self, path: Path, data: dict) -> None:
@@ -598,8 +655,14 @@ class BridgeAdapter(BasePlatformAdapter):
         the old or the new file, never a torn write. This guards the three
         mutating persistence files (unified_threads/reply_map/identity_map)
         against near-simultaneous writes from multiple bridges.
+
+        T-079: the temp name includes a uuid component so two concurrent
+        bridges writing the same persistence file never collide on a shared
+        ``<path>.tmp`` path (the old predictable suffix meant a second write
+        could ``os.replace`` over the first writer's temp, or the losing
+        writer could unlink the winner's temp in its error path).
         """
-        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp = path.with_name(f"{path.name}.{uuid.uuid4().hex}.tmp")
         try:
             tmp.write_text(
                 json.dumps(data, ensure_ascii=False, indent=2), "utf-8"
@@ -1734,6 +1797,18 @@ class BridgeAdapter(BasePlatformAdapter):
             for filepath in files:
                 if not filepath.suffix == ".json":
                     continue
+                # T-072: reject symlinks in the inbox. The inbox is a
+                # drop-point that the wrapper writes real files to; a
+                # symlink could point at /etc/passwd or another bridge's
+                # state file, letting a malicious or compromised wrapper
+                # read arbitrary files through the adapter. Reject (skip
+                # + mark seen) without following the link.
+                if filepath.is_symlink():
+                    logger.warning(
+                        "Rejecting symlink in inbox (T-072): %s", filepath
+                    )
+                    self._seen_files.add(str(filepath.absolute()))
+                    continue
                 key = str(filepath.absolute())
                 if key in self._seen_files:
                     continue
@@ -1958,7 +2033,11 @@ class BridgeAdapter(BasePlatformAdapter):
                 # drops messages entirely.)
                 st = self._adaptive_state(unified_name)
                 now = time.time()
-                if st["state"] == "digesting" and now >= st["digest_until"]:
+                if (
+                    st["state"] == "digesting"
+                    and now >= st["digest_until"]
+                    and now >= st.get("cooldown_until", 0)  # T-080
+                ):
                     # Flush the buffer as one bundled turn (agent reads along).
                     buf = st["buffer"]
                     buf.append({"ts": now, "sender": sender, "text": text})
@@ -2030,7 +2109,11 @@ class BridgeAdapter(BasePlatformAdapter):
             if mode == "participant":
                 st = self._adaptive_state(unified_name)
                 now = time.time()
-                if st["state"] == "digesting" and now >= st["digest_until"]:
+                if (
+                    st["state"] == "digesting"
+                    and now >= st["digest_until"]
+                    and now >= st.get("cooldown_until", 0)  # T-080
+                ):
                     # Flush: append the current message, then dispatch the
                     # whole buffer as one bundled turn.
                     buf = st["buffer"]
@@ -2052,6 +2135,23 @@ class BridgeAdapter(BasePlatformAdapter):
                     # normal dispatch path build the event + routing ctx.
                     text = bundle_text
                 else:
+                    # If the thread is already ``digesting`` (flush deferred
+                    # either because the digest window hasn't elapsed OR
+                    # because a post-flush cooldown is still active — T-080),
+                    # append to the buffer and keep digesting. Otherwise let
+                    # _adaptive_note_message decide based on frequency.
+                    if st["state"] == "digesting":
+                        st["buffer"].append(
+                            {"ts": now, "sender": sender, "text": text}
+                        )
+                        st["last_msg_ts"] = now
+                        st["digest_until"] = now + self.ADAPTIVE_DIGEST_INTERVAL
+                        self._save_unified_threads()
+                        try:
+                            filepath.unlink()
+                        except OSError:
+                            pass
+                        return
                     action = self._adaptive_note_message(unified_name, sender, text)
                     if action == "buffer":
                         try:
@@ -2121,7 +2221,12 @@ class BridgeAdapter(BasePlatformAdapter):
         # ``reply_to=event.message_id`` resolves to the bridge-local id.
         local_id = data.get("id") or data.get("message_id") or ""
         if local_id:
-            self._reply_map[gateway_msg_id] = {"bridge": bridge, "local_msg_id": local_id}
+            # T-078: stamp the entry with ``ts`` so _save_reply_map can
+            # prune entries older than REPLY_MAP_TTL (the map would otherwise
+            # grow unbounded — each inbound appends, each save rewrites all).
+            self._reply_map[gateway_msg_id] = {
+                "bridge": bridge, "local_msg_id": local_id, "ts": time.time(),
+            }
             self._save_reply_map()
 
         # Mention gating for group chats
@@ -2418,6 +2523,11 @@ class BridgeAdapter(BasePlatformAdapter):
             if not st or st.get("state") != "digesting":
                 continue
             if now < st.get("digest_until", 0):
+                continue
+            # T-080: defer the flush while a post-flush cooldown is still
+            # active so a burst right after a flush doesn't immediately
+            # dispatch again (the cooldown set after the last flush).
+            if now < st.get("cooldown_until", 0):
                 continue
             buf = st.get("buffer", [])
             if not buf:

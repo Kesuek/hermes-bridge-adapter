@@ -77,32 +77,26 @@ capabilities: [text]
 
 ```json
 {
+  "bridge": "imsg",
   "id": "msg_abc123",
-  "type": "message",
+  "sender": "user_42",
+  "sender_name": "Alice",
+  "text": "Hello! Can you check the deployment status?",
   "timestamp": "2026-07-26T12:00:00Z",
-  "from": {
-    "id": "user_42",
-    "name": "Alice",
-    "platform": "imsg"
-  },
   "chat": {
     "id": "chat_99",
+    "type": "group",
     "name": "Project Chat"
   },
-  "text": "Hello! Can you check the deployment status?",
-  "thread_id": "thread_001",
-  "thread_root": "msg_001",
   "attachments": [
     {
       "type": "image",
-      "path": "media/imsg/incoming/screenshot.jpg",
-      "mime": "image/jpeg"
+      "url": "media/imsg/incoming/screenshot.jpg",
+      "mime": "image/jpeg",
+      "size": 204800
     }
   ],
-  "reply_to": {
-    "id": "msg_001",
-    "text": "Previous message"
-  }
+  "reply_to": "msg_001"
 }
 ```
 
@@ -110,25 +104,22 @@ capabilities: [text]
 
 ```json
 {
+  "bridge": "imsg",
   "id": "out_xyz789",
-  "type": "message",
-  "target": {
-    "chat_id": "chat_99",
-    "bridge": "imsg"
-  },
+  "target": "imsg~chat_99",
   "text": "Sure, let me check that.",
-  "thread_id": "thread_001",
   "attachments": [
     {
       "type": "image",
-      "path": "media/imsg/outgoing/result.png",
-      "mime": "image/png"
+      "url": "media/imsg/outgoing/result.png",
+      "mime": "image/png",
+      "size": 102400
     }
   ],
   "typing": true,
-  "reply_to": {
-    "id": "msg_abc123"
-  }
+  "reply_to": "msg_abc123",
+  "thread_id": "thread_001",
+  "metadata": {}
 }
 ```
 

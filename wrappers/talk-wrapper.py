@@ -40,6 +40,22 @@ logging.basicConfig(
 )
 logger = logging.getLogger("talk-wrapper")
 
+
+def _write_private(path: Path, content: str) -> None:
+    """Write a file with 0600 perms (T-071).
+
+    State/status/manifest files may carry tokens or routing secrets and
+    must not be world-readable on a shared host. ``write_text`` alone
+    leaves the file at the umask default (often 0644); ``chmod 0o600``
+    enforces it regardless of umask. Inbox messages carry no secrets but
+    are kept 0600 for consistency.
+    """
+    path.write_text(content, "utf-8")
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        logger.warning("chmod 0o600 failed for %s", path)
+
 # ── Env loading ─────────────────────────────────────────────────────
 # Load NEXTCLOUD_* from ~/.hermes/.env if not already in the environment
 # (systemd services don't source .env; this makes the wrapper self-contained).
@@ -162,7 +178,7 @@ capabilities: [text]
 
 def register_manifest():
     MANIFEST_FILE.parent.mkdir(parents=True, exist_ok=True)
-    MANIFEST_FILE.write_text(MANIFEST_CONTENT, "utf-8")
+    _write_private(MANIFEST_FILE, MANIFEST_CONTENT)
     logger.info("Wrote registry manifest: %s", MANIFEST_FILE)
 
 
@@ -185,7 +201,7 @@ def write_status(connected: bool, error: str = None):
         "last_seen": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         "error": error,
     }
-    STATUS_FILE.write_text(json.dumps(status, indent=2), "utf-8")
+    _write_private(STATUS_FILE, json.dumps(status, indent=2))
 
 
 # ── State (last_seen dedup) ─────────────────────────────────────────
@@ -203,7 +219,7 @@ def load_last_seen() -> dict:
 def save_last_seen(state: dict):
     try:
         STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        STATE_FILE.write_text(json.dumps(state, indent=2), "utf-8")
+        _write_private(STATE_FILE, json.dumps(state, indent=2))
     except OSError as e:
         logger.warning("Failed to save state: %s", e)
 
@@ -216,7 +232,7 @@ def write_inbox(data: dict):
     inbox_dir.mkdir(parents=True, exist_ok=True)
     msg_id = data.get("id", str(uuid.uuid4()))
     path = inbox_dir / f"{msg_id}.json"
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), "utf-8")
+    _write_private(path, json.dumps(data, ensure_ascii=False, indent=2))
     logger.info("Wrote inbox: %s (from %s)", path, data.get("sender", "?"))
 
 
