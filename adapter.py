@@ -1643,8 +1643,20 @@ class BridgeAdapter(BasePlatformAdapter):
         return leaf
 
     def _protokoll_dir(self, thread_name: str) -> Path:
-        """Directory where protokoll artifacts are stored: <bridge_dir>/protokoll/<thread>/."""
-        return self._bridge_dir / "protokoll" / thread_name if self._bridge_dir else Path()
+        """Directory where protokoll artifacts are stored: <bridge_dir>/protokoll/<thread>/.
+
+        T-085: the thread name is used as a filesystem directory component and
+        must never escape the ``protokoll`` root. A crafted name like ``../../evil``
+        (or an absolute path) is collapsed to its basename leaf, so the artifact
+        always lands under ``<bridge_dir>/protokoll/<basename>/``. Lookup by the
+        original thread name is unaffected — this only sanitizes the on-disk dir.
+        """
+        if not self._bridge_dir:
+            return Path()
+        leaf = Path(thread_name).name
+        if not leaf or leaf in (".", ".."):
+            return Path()
+        return self._bridge_dir / "protokoll" / leaf
 
     def _cmd_unified_protokoll_open(
         self, bridge: str, data: dict, name: str, sitzung: str = ""
