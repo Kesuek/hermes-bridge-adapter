@@ -449,3 +449,20 @@ def test_run_cleanup_purges_expired_claims(tmp_path):
     # Persisted file must be updated too, not just the in-memory dict.
     a._load_pending_claims()
     assert expired_id not in a._pending_claims
+
+
+def test_run_cleanup_runs_via_to_thread(tmp_path, monkeypatch):
+    """T-088: the blocking media/outbox sweep must run through
+    asyncio.to_thread(self._run_cleanup_sync), not inline in the event loop.
+    """
+    a = _make_adapter(tmp_path)
+    calls = []
+    real_to_thread = asyncio.to_thread
+
+    async def fake_to_thread(fn, *args, **kwargs):
+        calls.append(fn.__name__)
+        return await real_to_thread(fn, *args, **kwargs)
+
+    monkeypatch.setattr(asyncio, "to_thread", fake_to_thread)
+    asyncio.run(a._run_cleanup())
+    assert calls == ["_run_cleanup_sync"]
