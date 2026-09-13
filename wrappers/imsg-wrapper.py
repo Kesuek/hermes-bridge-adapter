@@ -180,6 +180,32 @@ def is_own(raw: dict) -> bool:
 # ── Watch stream (primary) ──────────────────────────────────────────
 
 
+def _bump_last_seen(raw: dict) -> None:
+    """Record a watch-delivered message in last_seen.json (T-091).
+
+    The history safety net compares against ``last_seen[chat_id]`` — if the
+    watch loop never writes there, every history poll re-delivers the last
+    HISTORY_LIMIT messages the watch stream just delivered (the adapter
+    already unlinked the inbox file, so ``_seen_files`` cannot dedupe).
+    The watch thread updates the shared state file under a lock so the
+    two loops cannot clobber each other's updates.
+    """
+    msg_id = int(raw.get("id", 0) or 0)
+    chat_id = str(
+        raw.get("chat_id", "") or raw.get("chat_identifier", "") or ""
+    )
+    if not msg_id or not chat_id:
+        return
+    with _last_seen_lock:
+        state = load_last_seen(STATE_FILE)
+        if msg_id > int(state.get(chat_id, 0) or 0):
+            state[chat_id] = msg_id
+            save_last_seen(state, STATE_FILE)
+
+
+_last_seen_lock = threading.Lock()
+
+
 def watch_loop():
     """Run the imsg watch stream with auto-reconnect + periodic restart.
 
@@ -224,6 +250,8 @@ def watch_loop():
                 if is_own(raw):
                     continue
                 write_inbox_private(BRIDGE, build_inbox_msg(raw))
+                # T-091: mark as seen so the history safety net skips it.
+                _bump_last_seen(raw)
                 backoff = 1.0  # healthy — reset backoff
 
                 # Periodic restart while the stream is healthy

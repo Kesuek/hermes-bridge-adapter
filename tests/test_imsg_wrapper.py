@@ -92,3 +92,96 @@ def test_scp_pull_uses_strict_host_key_checking(monkeypatch, tmp_path):
         "SCP attachment pull must enforce StrictHostKeyChecking=yes (T-075); "
         f"got: {joined}"
     )
+
+# ── T-091: watch loop must bump last_seen (history race) ────────────
+
+
+def _patch_no_subprocess(monkeypatch):
+    """Neutralise any subprocess call a stray code path might make."""
+    class _FakeResult:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def fake(*a, **k):
+        return _FakeResult()
+
+    def no_popen(*a, **k):
+        raise AssertionError("no Popen expected")
+
+    monkeypatch.setattr(subprocess, "run", fake)
+    monkeypatch.setattr(subprocess, "Popen", no_popen)
+
+
+def _load_w():
+    return _load_wrapper_module()
+
+
+def test_bump_last_seen_updates_state(monkeypatch, tmp_path):
+    """T-091: _bump_last_seen must write the message id into last_seen.json
+    so the history safety net skips already-delivered messages."""
+    w = _load_w()
+    monkeypatch.setattr(w, "STATE_FILE", tmp_path / "state" / "last_seen.json")
+    _patch_no_subprocess(monkeypatch)
+
+    w._bump_last_seen({"id": 3477, "chat_id": "42"})
+
+    state = w.load_last_seen(w.STATE_FILE)
+    assert state.get("42") == 3477
+
+
+def test_bump_last_seen_monotonic(monkeypatch, tmp_path):
+    """T-091: an older message id must never move last_seen backwards."""
+    w = _load_w()
+    monkeypatch.setattr(w, "STATE_FILE", tmp_path / "state" / "last_seen.json")
+    _patch_no_subprocess(monkeypatch)
+
+    w.save_last_seen({"42": 4000}, w.STATE_FILE)
+    w._bump_last_seen({"id": 3477, "chat_id": "42"})
+
+    state = w.load_last_seen(w.STATE_FILE)
+    assert state.get("42") == 4000
+
+
+def test_history_poll_skips_watch_seen_messages(monkeypatch, tmp_path):
+    """T-091 fail-beweis: after the watch loop bumps last_seen, the history
+    safety net must NOT re-write the same message to the inbox (the race
+    that produced duplicate dispatches + reply_map entries).
+
+    Reproduces the live pattern: watch delivered msg 3477 → adapter
+    unlinked the inbox file → history poll re-delivered it 13 s later.
+    """
+    w = _load_w()
+    monkeypatch.setattr(w, "STATE_FILE", tmp_path / "state" / "last_seen.json")
+    _patch_no_subprocess(monkeypatch)
+
+    # The watch loop has delivered msg 3477 and bumped last_seen.
+    w._bump_last_seen({"id": 3477, "chat_id": "42"})
+
+    # History poll sees the same message via `imsg chats` + `imsg history`.
+    def fake_ssh_run(cmd, timeout=30):
+        res = type("R", (), {})()
+        res.returncode = 0
+        if "imsg chats" in cmd:
+            res.stdout = '{"id": "42", "identifier": "u1"}\n'
+            res.stderr = ""
+        else:  # imsg history
+            res.stdout = '{"id": 3477, "sender": "u1", "text": "hello"}\n'
+            res.stderr = ""
+        return res
+
+    monkeypatch.setattr(w, "ssh_run", fake_ssh_run)
+
+    written = []
+    monkeypatch.setattr(
+        w, "write_inbox_private", lambda *a, **k: written.append(a)
+    )
+
+    last_seen = w.load_last_seen(w.STATE_FILE)
+    last_seen = w.poll_history_once(last_seen)
+    w.save_last_seen(last_seen, w.STATE_FILE)
+
+    assert not written, (
+        "history poll must not re-deliver a message the watch loop "
+        f"already delivered (T-091); wrote: {written}"
+    )

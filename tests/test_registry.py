@@ -695,3 +695,31 @@ def test_copy_to_media_dir_accepts_inside(tmp_path):
     rel = a._copy_to_media_dir("imsg", "media/imsg/incoming/doc.pdf", "abc123", "outgoing")
     assert rel is not None
     assert (a._bridge_dir / rel).exists()
+
+
+# ── T-092: host field must accept URLs (Talk-registry regression) ────
+
+
+def test_manifest_host_accepts_url():
+    """T-092 fail-beweis: `host: https://cloud.rpon.eu` contains `/` — the
+    T-072 separator check rejected it, so scan_registry skipped the whole
+    talk.yaml manifest and the Talk bridge was never registered. host is a
+    network endpoint, never used in path construction."""
+    m = adapter.load_manifest(
+        {"name": "talk", "service": "nextcloud-talk", "host": "https://cloud.rpon.eu"}
+    )
+    assert m.host == "https://cloud.rpon.eu"
+
+
+def test_manifest_host_still_rejects_traversal():
+    """T-092: the host exemption must not reopen a traversal hole."""
+    with pytest.raises(ValueError):
+        adapter.load_manifest({"name": "evil", "host": "../.."})
+    with pytest.raises(ValueError):
+        adapter.load_manifest({"name": "talk", "host": "https://x/../../etc"})
+
+
+def test_manifest_service_separator_check_unchanged():
+    """T-072 contract stays: service/name-like fields still reject separators."""
+    with pytest.raises(ValueError):
+        adapter.load_manifest({"name": "talk", "service": "a/b"})

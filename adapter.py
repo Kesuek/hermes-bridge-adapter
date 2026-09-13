@@ -126,15 +126,25 @@ class BridgeManifest:
 def _safe_manifest_field(value: str, field: str) -> str:
     """Reject path traversal / separators in a manifest string field (T-072).
 
-    Manifest fields like ``service`` and ``host`` are identifiers, not
-    paths. A value with ``..`` or a path separator (``/``, ``\\``) could
-    be used to name a bridge with a traversal string that later flows into
-    filesystem construction (e.g. status/ or media/ paths built from the
-    bridge name, or downstream tools that treat ``service`` as a path).
-    Reject such values by raising ValueError so ``scan_registry`` skips
-    the manifest.
+    Manifest fields like ``service`` are identifiers, not paths. A value
+    with ``..`` or a path separator (``/``, ``\\\\``) could be used to name
+    a bridge with a traversal string that later flows into filesystem
+    construction (e.g. status/ or media/ paths built from the bridge name,
+    or downstream tools that treat ``service`` as a path). Reject such
+    values by raising ValueError so ``scan_registry`` skips the manifest.
+
+    ``host`` is exempt (T-092): it is a network endpoint (``https://…``),
+    never flows into filesystem path construction, and URL-legal values
+    like ``https://cloud.example`` must not be rejected.
     """
     if not value:
+        return value
+    if field == "host":
+        # URLs are legitimate values; only reject traversal components.
+        if ".." in value:
+            raise ValueError(
+                f"Manifest field {field!r} must not contain traversal (got {value!r})"
+            )
         return value
     # Reject any path separator or traversal component.
     if "/" in value or "\\" in value or ".." in value:
