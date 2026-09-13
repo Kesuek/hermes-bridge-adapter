@@ -44,6 +44,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   usage strings are unchanged.
 
 ### Fixed
+- **T-089:** Processed inbox files are discarded from `_seen_files` when
+  unlinked (new `_unlink_inbox_file` helper used by all inbox unlink sites),
+  and `_run_cleanup` now proactively purges expired `pending_claims` from
+  memory and `pending_claims.json`. Previously the seen-set only ever grew
+  over the process lifetime, and expired claims lingered in the persistence
+  file until a random confirm attempt touched them.
 - **T-078:** `reply_map` now prunes entries older than 7 days (and caps at
   5000) on save. Previously every inbound appended an entry and every save
   rewrote the whole file — the map grew unbounded (O(n²) over time).

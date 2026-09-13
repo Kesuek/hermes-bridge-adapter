@@ -385,3 +385,67 @@ def test_manifest_path_traversal_rejected(tmp_path):
     a._reconcile_registry_sync()
     assert "evil" not in a._bridges, \
         "manifest with traversal in service must be rejected"
+
+
+# ── T-089: seen-file discard + claim expiry sweep ────────────────────
+
+
+def test_seen_files_discarded_on_unlink(tmp_path):
+    """T-089a: a processed inbox file must be removed from _seen_files.
+
+    Previously the adapter only ever added to _seen_files, so entries
+    accumulated for the whole process lifetime even though the corresponding
+    files were unlinked right after processing. With the discard-on-unlink
+    helper the set stays proportional to the number of in-flight files.
+    """
+    a = _make_adapter(tmp_path)
+    reg = a._bridge_dir / "registry"
+    reg.mkdir()
+    (reg / "imsg.yaml").write_text("name: imsg\ntarget_format: [chat_id]\n",
+                                   encoding="utf-8")
+    a._reconcile_registry_sync()
+    a._extra["allow_all"] = "true"
+    a.handle_message = AsyncMock()
+
+    inbox = a._bridge_dir / "inbox" / "imsg"
+    inbox.mkdir(parents=True, exist_ok=True)
+    msg = inbox / "msg.json"
+    msg.write_text('{"sender": "x", "text": "hi", "chat": {"id": "c1"}}',
+                   encoding="utf-8")
+
+    asyncio.run(a._poll_all())
+
+    a.handle_message.assert_awaited_once()
+    assert not msg.exists(), "processed inbox file must be unlinked"
+    assert str(msg.absolute()) not in a._seen_files, (
+        "a processed (unlinked) inbox file must be discarded from _seen_files"
+    )
+
+
+def test_run_cleanup_purges_expired_claims(tmp_path):
+    """T-089b: _run_cleanup proactively deletes expired pending claims from
+    the in-memory dict AND the persisted pending_claims.json, instead of
+    leaving them to linger until the next confirm attempt touches them.
+    """
+    a = _make_adapter(tmp_path)
+    a._bridges = ["imsg", "talk"]
+    a._load_unified_threads()
+    a._load_pending_claims()
+    a._load_identity_map()
+    expired_id = "deadbeef"
+    a._pending_claims[expired_id] = {
+        "code": "123456",
+        "source": "imsg:ronny",
+        "target": "talk~ronny",
+        "expires": time.time() - 10,  # already expired
+        "attempts": 0,
+    }
+    a._save_pending_claims()
+    assert (a._bridge_dir / "pending_claims.json").exists()
+
+    asyncio.run(a._run_cleanup())
+
+    assert expired_id not in a._pending_claims
+    # Persisted file must be updated too, not just the in-memory dict.
+    a._load_pending_claims()
+    assert expired_id not in a._pending_claims

@@ -1035,10 +1035,7 @@ class BridgeAdapter(BasePlatformAdapter):
             await self._send_reply(bridge, data, await handler(bridge, data, args))
 
         # Remove the processed inbox file.
-        try:
-            filepath.unlink()
-        except OSError:
-            pass
+        self._unlink_inbox_file(filepath)
 
     # ── /unified subcommand wrappers (T-087) ─────────────────────────
     #
@@ -1767,6 +1764,21 @@ class BridgeAdapter(BasePlatformAdapter):
 
     # ── Polling ─────────────────────────────────────────────────────
 
+    def _unlink_inbox_file(self, filepath: Path) -> None:
+        """Remove a processed inbox file and its seen-marker (T-089).
+
+        Wraps the plain unlink in OSError-quiet (like every caller did) and
+        additionally discards the path from ``_seen_files``: previously the
+        set only ever grew, so entries for already-deleted files accumulated
+        for the whole process lifetime. With the discard the set stays
+        proportional to the number of in-flight files.
+        """
+        try:
+            filepath.unlink()
+        except OSError:
+            pass
+        self._seen_files.discard(str(filepath.absolute()))
+
     async def _poll_loop(self) -> None:
         """Poll all bridge inbox directories continuously."""
         while self._running:
@@ -1873,10 +1885,7 @@ class BridgeAdapter(BasePlatformAdapter):
                     "Rejecting /unified command from unauthorized sender %s "
                     "(bridge=%s)", sender_id, bridge,
                 )
-                try:
-                    filepath.unlink()
-                except OSError:
-                    pass
+                self._unlink_inbox_file(filepath)
                 return
             await self._handle_unified_command(bridge, data, filepath)
             return
@@ -2002,20 +2011,14 @@ class BridgeAdapter(BasePlatformAdapter):
             if mode == "reactive" and not self._is_mentioned(text, bridge):
                 # Mention-gating like a group chat: drop the message and the
                 # inbox file so it isn't re-seen.
-                try:
-                    filepath.unlink()
-                except OSError:
-                    pass
+                self._unlink_inbox_file(filepath)
                 return
             if mode == "off":
                 # Off: the agent gets nothing — no context, no turn. Drop
                 # the message and the inbox file. (Distinct from `silent`,
                 # which is the mute switch: the agent reads along via digest
                 # but never replies.)
-                try:
-                    filepath.unlink()
-                except OSError:
-                    pass
+                self._unlink_inbox_file(filepath)
                 return
             if mode == "silent":
                 # Silent (mute switch): the agent reads along but never
@@ -2059,10 +2062,7 @@ class BridgeAdapter(BasePlatformAdapter):
                     st["buffer"].append({"ts": now, "sender": sender, "text": text})
                     st["digest_until"] = now + self.ADAPTIVE_DIGEST_INTERVAL
                     self._save_unified_threads()
-                    try:
-                        filepath.unlink()
-                    except OSError:
-                        pass
+                    self._unlink_inbox_file(filepath)
                     return
                 # Fall through to dispatch (the agent reads the digest but
                 # is instructed not to reply).
@@ -2082,10 +2082,7 @@ class BridgeAdapter(BasePlatformAdapter):
                     })
                     self._save_unified_threads()
                     # Not dispatched — protocol logs, doesn't reply.
-                    try:
-                        filepath.unlink()
-                    except OSError:
-                        pass
+                    self._unlink_inbox_file(filepath)
                     return
 
         # Adaptive digest (T-061): if the thread is in ``digesting`` state,
@@ -2142,17 +2139,11 @@ class BridgeAdapter(BasePlatformAdapter):
                         st["last_msg_ts"] = now
                         st["digest_until"] = now + self.ADAPTIVE_DIGEST_INTERVAL
                         self._save_unified_threads()
-                        try:
-                            filepath.unlink()
-                        except OSError:
-                            pass
+                        self._unlink_inbox_file(filepath)
                         return
                     action = self._adaptive_note_message(unified_name, sender, text)
                     if action == "buffer":
-                        try:
-                            filepath.unlink()
-                        except OSError:
-                            pass
+                        self._unlink_inbox_file(filepath)
                         return
 
         effective_text = f"{text}\n\n[{routing_ctx}]" if text else f"[{routing_ctx}]"
@@ -2232,19 +2223,13 @@ class BridgeAdapter(BasePlatformAdapter):
             # the inbox AND in _seen_files → never processed again until the
             # gateway restarts (the "needs a restart" bug). Mirror the
             # is_user_allowed path which also unlinks.
-            try:
-                filepath.unlink()
-            except OSError:
-                pass
+            self._unlink_inbox_file(filepath)
             return
 
         await self.handle_message(event)
 
         # Remove processed file
-        try:
-            filepath.unlink()
-        except OSError:
-            pass
+        self._unlink_inbox_file(filepath)
 
     async def _process_reaction(
         self, bridge: str, data: dict, filepath: Path
@@ -2252,10 +2237,7 @@ class BridgeAdapter(BasePlatformAdapter):
         """Handle a reaction event from the inbox."""
         if not self._reaction_handler:
             logger.debug("No reaction handler set, skipping reaction")
-            try:
-                filepath.unlink()
-            except OSError:
-                pass
+            self._unlink_inbox_file(filepath)
             return
 
         reaction_event = {
@@ -2274,10 +2256,7 @@ class BridgeAdapter(BasePlatformAdapter):
         except Exception as e:
             logger.warning("Reaction handler failed: %s", e)
 
-        try:
-            filepath.unlink()
-        except OSError:
-            pass
+        self._unlink_inbox_file(filepath)
 
     # ── Sending ──────────────────────────────────────────────────────
 
@@ -2587,10 +2566,26 @@ class BridgeAdapter(BasePlatformAdapter):
             await asyncio.sleep(CLEANUP_INTERVAL)
 
     async def _run_cleanup(self) -> None:
-        """Remove old media files and stale outbox JSON files."""
+        """Remove expired claims, old media and stale outbox JSON files."""
         now = time.time()
         if not self._bridge_dir:
             return
+
+        # T-089: sweep expired pending identity claims. Previously expired
+        # claims lingered in the dict (and pending_claims.json) until the
+        # next confirm attempt happened to touch them; the periodic cleanup
+        # purges them proactively so the persistence file does not grow with
+        # dead entries.
+        expired = [
+            claim_id
+            for claim_id, claim in self._pending_claims.items()
+            if now > claim["expires"]
+        ]
+        if expired:
+            for claim_id in expired:
+                del self._pending_claims[claim_id]
+            self._save_pending_claims()
+            logger.debug("Purged %d expired identity claims", len(expired))
 
         # Cleanup media/ files older than MEDIA_CLEANUP_MAX_AGE
         media_root = self._bridge_dir / "media"
