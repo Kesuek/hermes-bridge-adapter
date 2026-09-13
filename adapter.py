@@ -2566,7 +2566,15 @@ class BridgeAdapter(BasePlatformAdapter):
             await asyncio.sleep(CLEANUP_INTERVAL)
 
     async def _run_cleanup(self) -> None:
-        """Remove expired claims, old media and stale outbox JSON files."""
+        """Remove expired claims, old media and stale outbox files.
+
+        The rglob/stat sweep over media/ and outbox/ is blocking I/O — it
+        runs in a worker thread via ``asyncio.to_thread`` so the event loop
+        is never stalled (T-088). The claim sweep itself is dict work on
+        already-loaded state plus one atomic JSON write; keeping it in the
+        coroutine preserves the exact ordering with concurrent
+        ``_save_pending_claims()`` writers.
+        """
         now = time.time()
         if not self._bridge_dir:
             return
@@ -2586,6 +2594,17 @@ class BridgeAdapter(BasePlatformAdapter):
                 del self._pending_claims[claim_id]
             self._save_pending_claims()
             logger.debug("Purged %d expired identity claims", len(expired))
+
+        await asyncio.to_thread(self._run_cleanup_sync)
+
+    def _run_cleanup_sync(self) -> None:
+        """Blocking part of the cleanup — runs in a worker thread (T-088).
+
+        The rglob/stat/unlink sweep over media/ and outbox/ is identical to
+        the pre-T-088 ``_run_cleanup`` body; it has no ordering dependency
+        on the event loop, so running it in a worker thread is equivalent.
+        """
+        now = time.time()
 
         # Cleanup media/ files older than MEDIA_CLEANUP_MAX_AGE
         media_root = self._bridge_dir / "media"

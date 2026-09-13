@@ -42,6 +42,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   subcommand existed in two places (a dispatch dict entry plus an `if/elif`
   branch), so the two could drift apart. Behavior, help text, aliases, and
   usage strings are unchanged.
+- **T-088:** The blocking media/outbox rglob-stat sweep in `_run_cleanup`
+  now runs in a worker thread via `asyncio.to_thread` (`_run_cleanup_sync`),
+  so a large media directory can no longer stall the adapter's event loop
+  for the duration of the sweep.
 
 ### Fixed
 - **T-089:** Processed inbox files are discarded from `_seen_files` when
