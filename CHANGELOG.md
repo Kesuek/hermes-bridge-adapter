@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Security
+- **T-086:** `/unified identity confirm` counts attempt strikes only when the
+  sent code matches **none** of the open candidate claims on the bridge
+  (two-pass flow). Previously a wrong code incremented `attempts` on every
+  same-bridge claim — including unrelated bystander claims — so a few wrong
+  codes (or 4 wrong codes + one legitimate confirm) could grief all open
+  claims of that bridge into deletion.
 - **T-071:** Wrapper state/status/manifest/inbox files are now written with
   `0600` permissions (central `_write_private` helper). State files may carry
   routing secrets/tokens and must not be world-readable on a shared host;

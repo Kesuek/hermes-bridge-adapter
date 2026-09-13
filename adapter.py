@@ -1470,33 +1470,29 @@ class BridgeAdapter(BasePlatformAdapter):
         proves control of both accounts (challenge-response). On success the
         target alias is merged into the source person's identity-map entry and
         the pending claim is cleared.
+
+        Two-pass flow (T-086): a wrong code is a FULL miss only when it
+        matches none of the candidate claims — then every candidate gets an
+        attempt and expired-counted ones are dropped (brute-force guard).
+        A matching code confirms exactly that one claim and must not burn
+        attempts on unrelated claims of the same bridge (review finding
+        2026-09-13: same-bridge griefing; the 2026-08-11 fix only covered
+        the cross-bridge case).
         """
         now = time.time()
-        # Wrong-code guard: a mismatching claim gets an attempt counted; too
-        # many invalidates it (brute-force protection, review finding 2026-08-10).
-        # Attempts are only counted against claims whose TARGET bridge matches
-        # the sender's bridge — a wrong code from one bridge must not burn
-        # attempts on unrelated claims on other bridges (review finding
-        # 2026-08-11: cross-claim griefing).
-        for claim_id, claim in list(self._pending_claims.items()):
-            target_bridge, _, _ = claim["target"].partition("~")
-            if target_bridge != bridge:
-                continue
-            if claim.get("attempts", 0) >= self.IDENTITY_CONFIRM_MAX_ATTEMPTS:
-                # Already brute-forced → drop it before checking the code.
-                del self._pending_claims[claim_id]
-                self._save_pending_claims()
-                continue
+        # Candidates: open, unexpired claims whose TARGET bridge matches the
+        # sender's bridge (as before).
+        candidates = [
+            (claim_id, claim)
+            for claim_id, claim in list(self._pending_claims.items())
+            if claim["target"].partition("~")[0] == bridge
+            and now <= claim["expires"]
+        ]
+        # Pass 1 (match): confirm the one claim whose code matches — no
+        # attempt is counted anywhere on a hit.
+        for claim_id, claim in candidates:
             if claim["code"] != code:
-                claim["attempts"] = claim.get("attempts", 0) + 1
-                if claim["attempts"] >= self.IDENTITY_CONFIRM_MAX_ATTEMPTS:
-                    del self._pending_claims[claim_id]
-                self._save_pending_claims()
                 continue
-            if now > claim["expires"]:
-                del self._pending_claims[claim_id]
-                self._save_pending_claims()
-                return "Claim expired. Start a new one with /unified identity claim."
             # The confirm must come from the target bridge/identity.
             target_bridge, _, target_id = claim["target"].partition("~")
             if bridge != target_bridge or data.get("sender", "") != target_id:
@@ -1529,6 +1525,28 @@ class BridgeAdapter(BasePlatformAdapter):
             del self._pending_claims[claim_id]
             self._save_pending_claims()
             return f"Confirmed. {source_id} and {target_id} are now the same person."
+        # Pass 2 (miss): the code matched no candidate — count one attempt on
+        # every candidate and drop those that reach the attempt cap. This
+        # stays the brute-force guard against code guessing on one's own
+        # claim (review finding 2026-08-10); cross- and same-bridge
+        # bystanders are only touched on a genuine miss (T-086).
+        changed = bool(candidates)
+        for claim_id, claim in candidates:
+            claim["attempts"] = claim.get("attempts", 0) + 1
+            if claim["attempts"] >= self.IDENTITY_CONFIRM_MAX_ATTEMPTS:
+                del self._pending_claims[claim_id]
+        # Expired candidates were filtered out above; purge them from the
+        # persisted map so expired claims do not linger.
+        expired = [
+            claim_id
+            for claim_id, claim in self._pending_claims.items()
+            if claim["target"].partition("~")[0] == bridge and time.time() > claim["expires"]
+        ]
+        for claim_id in expired:
+            del self._pending_claims[claim_id]
+            changed = True
+        if changed:
+            self._save_pending_claims()
         return "Invalid or unknown code."
 
     def _cmd_unified_set_username(self, bridge: str, data: dict, name: str) -> str:

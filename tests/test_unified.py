@@ -1473,6 +1473,84 @@ def test_identity_confirm_attempts_isolated_per_bridge(tmp_path):
     assert "confirmed" in result.lower() or "merged" in result.lower()
 
 
+def test_confirm_wrong_code_does_not_burn_other_claims(tmp_path):
+    """Review finding (2026-09-13, T-086): a wrong confirm code must not burn
+    attempts on unrelated claims of the same bridge.
+
+    Two claims target the same bridge (talk~anja and talk~ronny). The
+    bystander claim is created FIRST — under the pre-fix logic every
+    candidate is burned by every wrong code AND by the correct confirm that
+    follows (the loop increments on the miss before it finds the match), so
+    4 wrong codes + 1 correct confirm delete the bystander at 5 attempts.
+    With the two-pass fix the correct code confirms only its own claim.
+    """
+    from unittest.mock import AsyncMock
+    a = _make_adapter(tmp_path)
+    a._bridges = ["imsg", "talk"]
+    a._load_unified_threads()
+    a._load_pending_claims()
+    a._load_identity_map()
+    a._write_outbox = AsyncMock()  # claims send codes to the target bridges
+    # Bystander claim first, then the claim that gets confirmed.
+    asyncio.run(a._cmd_unified_identity_claim("imsg", {"sender": "anja"}, "talk~anja"))
+    asyncio.run(a._cmd_unified_identity_claim(
+        "imsg", {"sender": "ronny.pietschke@icloud.com"}, "talk~ronny"))
+    anja_id = next(
+        cid for cid, c in a._pending_claims.items() if c["target"] == "talk~anja"
+    )
+    ronny_id = next(
+        cid for cid, c in a._pending_claims.items() if c["target"] == "talk~ronny"
+    )
+    ronny_code = a._pending_claims[ronny_id]["code"]
+    anja_code = a._pending_claims[anja_id]["code"]
+    # Four wrong codes: a full miss counts one attempt per candidate, so both
+    # claims sit at 4 afterwards (brute-force guard still counts full misses).
+    wrong = 0
+    while f"{wrong:06d}" in (ronny_code, anja_code):
+        wrong += 1
+    wrong_code = f"{wrong:06d}"
+    for _ in range(4):
+        result = a._cmd_unified_identity_confirm("talk", {"sender": "ronny"}, wrong_code)
+        assert "invalid" in result.lower() or "unknown" in result.lower()
+    # The correct code for the talk~ronny claim confirms THAT claim ...
+    result = a._cmd_unified_identity_confirm("talk", {"sender": "ronny"}, ronny_code)
+    assert "confirmed" in result.lower() or "merged" in result.lower()
+    assert ronny_id not in a._pending_claims
+    # ... without burning the talk~anja claim (pre-fix: anja reached 5
+    # attempts on this call and was deleted together with ronny's claim).
+    assert anja_id in a._pending_claims
+    assert a._pending_claims[anja_id]["attempts"] == 4
+
+
+def test_confirm_attempt_brute_force_still_invalidates_own_claim(tmp_path):
+    """T-086 keeps the brute-force guard: with a single open claim on the
+    bridge, 5 wrong codes must still invalidate that claim (existing
+    behavior from review finding 2026-08-10 is preserved).
+    """
+    from unittest.mock import AsyncMock
+    a = _make_adapter(tmp_path)
+    a._bridges = ["imsg", "talk"]
+    a._load_unified_threads()
+    a._load_pending_claims()
+    a._load_identity_map()
+    a._write_outbox = AsyncMock()  # claim sends a code to the target bridge
+    asyncio.run(a._cmd_unified_identity_claim(
+        "imsg", {"sender": "ronny.pietschke@icloud.com"}, "talk~ronny"))
+    claim_id = next(iter(a._pending_claims))
+    code = a._pending_claims[claim_id]["code"]
+    wrong = 0
+    for _ in range(a.IDENTITY_CONFIRM_MAX_ATTEMPTS):
+        while f"{wrong:06d}" == code:
+            wrong += 1
+        result = a._cmd_unified_identity_confirm("talk", {"sender": "ronny"}, f"{wrong:06d}")
+        wrong += 1
+        assert "invalid" in result.lower() or "unknown" in result.lower()
+    # The claim is invalidated and the deletion is persisted.
+    assert claim_id not in a._pending_claims
+    a._load_pending_claims()
+    assert claim_id not in a._pending_claims
+
+
 def test_set_username(tmp_path):
     """T-065 Task 4: /unified set username <name> sets the display name."""
     a = _make_adapter(tmp_path)
