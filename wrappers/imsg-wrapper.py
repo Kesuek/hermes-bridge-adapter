@@ -3,7 +3,10 @@
 imsg-wrapper — Bridge Adapter wrapper for iMessage.
 
 Drives imsg over SSH on a remote macOS host, feeding the Bridge Adapter
-(registry-based, see adapter.py).
+(registry-based, see adapter.py). Platform logic (SSH transport, imsg CLI,
+attachment SCP, chat-identifier resolution) lives HERE; the shared bridge
+contract (manifest, status, last_seen, inbox/outbox) lives in the
+hermes_bridge_sdk package (T-090).
 
 Design (T-052):
 - **Watch stream as primary source** — `imsg watch --json --reactions`
@@ -42,6 +45,16 @@ import time
 import uuid
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from hermes_bridge_sdk import (  # noqa: E402
+    BridgeRunner,
+    load_last_seen,
+    save_last_seen,
+    write_inbox_private,
+    write_status,
+)
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -49,7 +62,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger("imsg-wrapper")
 
-BRIDGE_DIR = Path(os.environ.get("BRIDGE_DIR", str(Path.home() / ".hermes" / "bridge")))
 BRIDGE = "imsg"
 SSH_HOST = os.environ.get("IMSG_SSH_HOST", "").strip()
 POLL_INTERVAL = float(os.environ.get("BRIDGE_POLL_INTERVAL", "1.0"))
@@ -57,9 +69,8 @@ HISTORY_POLL_INTERVAL = float(os.environ.get("BRIDGE_HISTORY_POLL_INTERVAL", "30
 HISTORY_LIMIT = int(os.environ.get("BRIDGE_HISTORY_LIMIT", "10"))
 WATCH_RESTART_INTERVAL = float(os.environ.get("WATCH_RESTART_INTERVAL", "21600"))  # 6h
 
+BRIDGE_DIR = Path(os.environ.get("BRIDGE_DIR", str(Path.home() / ".hermes" / "bridge")))
 STATE_FILE = BRIDGE_DIR / "state" / BRIDGE / "last_seen.json"
-STATUS_FILE = BRIDGE_DIR / "status" / BRIDGE / "status.json"
-MANIFEST_FILE = BRIDGE_DIR / "registry" / "imsg.yaml"
 
 # Handles considered "ours" (own messages) — never re-injected.
 # Set IMSG_OWN_HANDLES to a comma-separated list of your own handles/IDs.
@@ -81,22 +92,6 @@ def _remote(cmd: str) -> list:
     return SSH_BASE + [cmd]
 
 
-def _write_private(path: Path, content: str) -> None:
-    """Write a file with 0600 perms (T-071).
-
-    State/status/manifest files may carry tokens or routing secrets and
-    must not be world-readable on a shared host. ``write_text`` alone
-    leaves the file at the umask default (often 0644); ``chmod 0o600``
-    enforces it regardless of umask. Inbox messages carry no secrets but
-    are kept 0600 for consistency.
-    """
-    path.write_text(content, "utf-8")
-    try:
-        os.chmod(path, 0o600)
-    except OSError:
-        logger.warning("chmod 0o600 failed for %s", path)
-
-
 def _shq(s: str) -> str:
     """Simple shell-quote for SSH commands."""
     return "'" + s.replace("'", "'\\''") + "'"
@@ -107,79 +102,7 @@ def ssh_run(cmd: str, timeout: int = 30) -> subprocess.CompletedProcess:
     return subprocess.run(_remote(cmd), capture_output=True, text=True, timeout=timeout)
 
 
-# ── Registry: self-registration (T-050) ─────────────────────────────
-
-
-MANIFEST_CONTENT = """\
-name: imsg
-service: imessage
-host: mac-mini-01
-target_format: [email, phone, chat_id]
-capabilities: [text, attachments, reactions]
-"""
-
-
-def register_manifest():
-    """Write the registry manifest so the adapter registers this bridge."""
-    MANIFEST_FILE.parent.mkdir(parents=True, exist_ok=True)
-    _write_private(MANIFEST_FILE, MANIFEST_CONTENT)
-    logger.info("Wrote registry manifest: %s", MANIFEST_FILE)
-
-
-def unregister_manifest():
-    """Remove the manifest so the adapter unregisters this bridge."""
-    try:
-        MANIFEST_FILE.unlink(missing_ok=True)
-        logger.info("Removed registry manifest: %s", MANIFEST_FILE)
-    except OSError as e:
-        logger.warning("Failed to remove manifest: %s", e)
-
-
-# ── Status ──────────────────────────────────────────────────────────
-
-
-def write_status(connected: bool, error: str = None):
-    status_dir = STATUS_FILE.parent
-    status_dir.mkdir(parents=True, exist_ok=True)
-    status = {
-        "bridge": BRIDGE,
-        "connected": connected,
-        "last_seen": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-        "error": error,
-    }
-    _write_private(STATUS_FILE, json.dumps(status, indent=2))
-
-
-# ── State (last_seen dedup) ─────────────────────────────────────────
-
-
-def load_last_seen() -> dict:
-    try:
-        if STATE_FILE.exists():
-            return json.loads(STATE_FILE.read_text("utf-8"))
-    except (json.JSONDecodeError, OSError):
-        pass
-    return {}
-
-
-def save_last_seen(state: dict):
-    try:
-        STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        _write_private(STATE_FILE, json.dumps(state, indent=2))
-    except OSError as e:
-        logger.warning("Failed to save state: %s", e)
-
-
-# ── Inbox helpers ───────────────────────────────────────────────────
-
-
-def write_inbox(data: dict):
-    inbox_dir = BRIDGE_DIR / "inbox" / BRIDGE
-    inbox_dir.mkdir(parents=True, exist_ok=True)
-    msg_id = data.get("id", str(uuid.uuid4()))
-    path = inbox_dir / f"{msg_id}.json"
-    _write_private(path, json.dumps(data, ensure_ascii=False, indent=2))
-    logger.info("Wrote inbox: %s (from %s)", path, data.get("sender", "?"))
+# ── Inbox message building (platform logic) ─────────────────────────
 
 
 def build_inbox_msg(raw: dict) -> dict:
@@ -273,7 +196,7 @@ def watch_loop():
         no messages arrive for a while. Runs in its own thread because the
         watch stream's read loop blocks on stdin."""
         while not stop_heartbeat.is_set():
-            write_status(connected=True)
+            write_status(BRIDGE, connected=True)
             stop_heartbeat.wait(60)
 
     while True:
@@ -286,7 +209,7 @@ def watch_loop():
                 bufsize=1,
             )
             logger.info("Watch stream started (pid %s)", proc.pid)
-            write_status(connected=True)
+            write_status(BRIDGE, connected=True)
             hb = threading.Thread(target=_heartbeat, daemon=True)
             hb.start()
 
@@ -300,7 +223,7 @@ def watch_loop():
                     continue
                 if is_own(raw):
                     continue
-                write_inbox(build_inbox_msg(raw))
+                write_inbox_private(BRIDGE, build_inbox_msg(raw))
                 backoff = 1.0  # healthy — reset backoff
 
                 # Periodic restart while the stream is healthy
@@ -320,7 +243,7 @@ def watch_loop():
             logger.error("Watch loop error: %s — reconnect in %.1fs", e, backoff)
             stop_heartbeat.set()
 
-        write_status(connected=False, error="watch stream down")
+        write_status(BRIDGE, connected=False, error="watch stream down")
         time.sleep(backoff)
         backoff = min(backoff * 2, 30.0)  # cap at 30s
         next_restart = time.time() + WATCH_RESTART_INTERVAL
@@ -382,7 +305,7 @@ def poll_history_once(last_seen: dict) -> dict:
             if not raw.get("text", "").strip() and not raw.get("attachments"):
                 continue
             try:
-                write_inbox(build_inbox_msg(raw))
+                write_inbox_private(BRIDGE, build_inbox_msg(raw))
             except Exception as e:
                 logger.error("Failed writing inbox for msg %s: %s", msg_id, e)
 
@@ -394,18 +317,18 @@ def poll_history_once(last_seen: dict) -> dict:
 
 def history_loop():
     """Run the history safety net at low frequency."""
-    last_seen = load_last_seen()
+    last_seen = load_last_seen(STATE_FILE)
     logger.info("History safety net started (every %.1fs)", HISTORY_POLL_INTERVAL)
     while True:
         try:
             last_seen = poll_history_once(last_seen)
-            save_last_seen(last_seen)
+            save_last_seen(last_seen, STATE_FILE)
         except Exception as e:
             logger.error("History poll error: %s", e)
         time.sleep(HISTORY_POLL_INTERVAL)
 
 
-# ── Outbox (outgoing) ───────────────────────────────────────────────
+# ── Outbox send (platform logic) ────────────────────────────────────
 
 
 def resolve_chat_identifier(target: str) -> str:
@@ -427,7 +350,7 @@ def resolve_chat_identifier(target: str) -> str:
     target = target.strip()
     if not target:
         return ""
-    if re.fullmatch(r"\d+", target):
+    if target.isdigit():
         res = ssh_run("imsg chats --json")
         if res.returncode == 0:
             try:
@@ -469,59 +392,27 @@ def send_imessage(target: str, text: str, attachments: list = None):
             logger.warning("Failed to send message: %s", result.stderr.strip())
 
 
-def outbox_loop():
-    """Poll outbox/imsg/ and send pending messages."""
-    outbox_dir = BRIDGE_DIR / "outbox" / BRIDGE
-    while True:
-        try:
-            for f in sorted(outbox_dir.glob("*.json"), key=lambda p: p.stat().st_mtime):
-                try:
-                    data = json.loads(f.read_text("utf-8"))
-                except (json.JSONDecodeError, OSError) as e:
-                    logger.warning("Invalid outbox JSON %s: %s", f, e)
-                    f.unlink(missing_ok=True)
-                    continue
-
-                if data.get("typing"):
-                    f.unlink(missing_ok=True)
-                    continue
-
-                send_imessage(
-                    data.get("target", ""),
-                    data.get("text", ""),
-                    data.get("attachments"),
-                )
-                f.unlink(missing_ok=True)
-        except Exception as e:
-            logger.error("Outbox poll error: %s", e)
-        time.sleep(POLL_INTERVAL)
-
-
 # ── Main ────────────────────────────────────────────────────────────
 
 
 def main():
     logger.info("imsg-wrapper starting — BRIDGE_DIR=%s, SSH_HOST=%s", BRIDGE_DIR, SSH_HOST)
-    register_manifest()
-    write_status(connected=True)
 
-    threads = [
-        threading.Thread(target=watch_loop, daemon=True, name="watch"),
-        threading.Thread(target=history_loop, daemon=True, name="history"),
-        threading.Thread(target=outbox_loop, daemon=True, name="outbox"),
-    ]
-    for t in threads:
-        t.start()
-
-    try:
-        while True:
-            time.sleep(60)
-    except KeyboardInterrupt:
-        logger.info("Shutting down...")
-    finally:
-        write_status(connected=False, error="shutdown")
-        unregister_manifest()
-        logger.info("imsg-wrapper stopped")
+    runner = BridgeRunner(
+        bridge=BRIDGE,
+        service="imessage",
+        host="mac-mini-01",
+        target_format=["email", "phone", "chat_id"],
+        capabilities=["text", "attachments", "reactions"],
+        send=send_imessage,
+        extra_threads=[
+            lambda: threading.Thread(target=watch_loop, daemon=True, name="watch"),
+            lambda: threading.Thread(target=history_loop, daemon=True, name="history"),
+        ],
+        poll_interval=POLL_INTERVAL,
+        logger_name="imsg-wrapper",
+    )
+    runner.main()
 
 
 if __name__ == "__main__":

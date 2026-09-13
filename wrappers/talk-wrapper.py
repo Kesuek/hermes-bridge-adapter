@@ -7,6 +7,10 @@ Talk via its REST API. Unlike imsg, Talk has NO watch stream — it is pure
 HTTP polling, so the inbound loop IS the primary source, with last_seen
 dedup so nothing is delivered twice.
 
+Platform logic lives HERE (API calls, field mapping); the shared bridge
+contract (manifest, status, last_seen, inbox/outbox) lives in the
+hermes_bridge_sdk package (T-090).
+
 Verified Talk API (Nextcloud 34.0.2 / Talk 24.0.3):
   - Room list : GET {HOST}/ocs/v2.php/apps/spreed/api/v4/room?format=json
                 (REQUIRES format=json in query)
@@ -25,36 +29,29 @@ Environment variables:
 """
 
 import json
-import logging
 import os
+import sys
 import time
-import uuid
-from pathlib import Path
-import threading
 import urllib.parse
 import urllib.request
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from hermes_bridge_sdk import (  # noqa: E402
+    BridgeRunner,
+    load_last_seen,
+    save_last_seen,
+    write_inbox_private,
+)
+import logging  # noqa: E402
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 logger = logging.getLogger("talk-wrapper")
-
-
-def _write_private(path: Path, content: str) -> None:
-    """Write a file with 0600 perms (T-071).
-
-    State/status/manifest files may carry tokens or routing secrets and
-    must not be world-readable on a shared host. ``write_text`` alone
-    leaves the file at the umask default (often 0644); ``chmod 0o600``
-    enforces it regardless of umask. Inbox messages carry no secrets but
-    are kept 0600 for consistency.
-    """
-    path.write_text(content, "utf-8")
-    try:
-        os.chmod(path, 0o600)
-    except OSError:
-        logger.warning("chmod 0o600 failed for %s", path)
 
 # ── Env loading ─────────────────────────────────────────────────────
 # Load NEXTCLOUD_* from ~/.hermes/.env if not already in the environment
@@ -71,7 +68,6 @@ if _ENV_FILE.exists():
         if _k.startswith("NEXTCLOUD_") and _k not in os.environ:
             os.environ[_k] = _v
 
-BRIDGE_DIR = Path(os.environ.get("BRIDGE_DIR", str(Path.home() / ".hermes" / "bridge")))
 BRIDGE = "talk"
 POLL_INTERVAL = float(os.environ.get("BRIDGE_POLL_INTERVAL", "5.0"))
 
@@ -79,9 +75,7 @@ NC_HOST = os.environ.get("NEXTCLOUD_HOST", "").rstrip("/")
 NC_USER = os.environ.get("NEXTCLOUD_USERNAME", "")
 NC_PASS = os.environ.get("NEXTCLOUD_PASSWORD", "")
 
-STATE_FILE = BRIDGE_DIR / "state" / BRIDGE / "last_seen.json"
-STATUS_FILE = BRIDGE_DIR / "status" / BRIDGE / "status.json"
-MANIFEST_FILE = BRIDGE_DIR / "registry" / "talk.yaml"
+STATE_FILE = Path(os.environ.get("BRIDGE_DIR", str(Path.home() / ".hermes" / "bridge"))) / "state" / BRIDGE / "last_seen.json"
 
 # Rooms that are personal notes / self-chats — don't mirror them.
 SKIP_ROOM_TYPES = {4, 6}  # 4=one-to-one self, 6=note-to-self
@@ -142,10 +136,6 @@ def is_direct_room(room: dict) -> bool:
     """True if the room is a 1:1 conversation (exactly 2 participants, not
     the self-chats). Talk reports such chats as type=2 (group) when they're
     not created through the one-to-one flow, so we resolve via participants.
-
-    A room is a direct chat if it has exactly two participants — the own
-    account and one other. Self/note rooms (type 4/6) are already excluded
-    by the caller, so here we only need the participant count.
     """
     token = room.get("token", "")
     if not token:
@@ -164,82 +154,10 @@ def send_message(room_token: str, text: str) -> bool:
     return bool(data)
 
 
-# ── Registry: self-registration (T-050) ─────────────────────────────
-
-
-MANIFEST_CONTENT = """\
-name: talk
-service: nextcloud-talk
-host: your-nextcloud.example.com
-target_format: [chat_id]
-capabilities: [text]
-"""
-
-
-def register_manifest():
-    MANIFEST_FILE.parent.mkdir(parents=True, exist_ok=True)
-    _write_private(MANIFEST_FILE, MANIFEST_CONTENT)
-    logger.info("Wrote registry manifest: %s", MANIFEST_FILE)
-
-
-def unregister_manifest():
-    try:
-        MANIFEST_FILE.unlink(missing_ok=True)
-        logger.info("Removed registry manifest: %s", MANIFEST_FILE)
-    except OSError as e:
-        logger.warning("Failed to remove manifest: %s", e)
-
-
-# ── Status ──────────────────────────────────────────────────────────
-
-
-def write_status(connected: bool, error: str = None):
-    STATUS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    status = {
-        "bridge": BRIDGE,
-        "connected": connected,
-        "last_seen": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-        "error": error,
-    }
-    _write_private(STATUS_FILE, json.dumps(status, indent=2))
-
-
-# ── State (last_seen dedup) ─────────────────────────────────────────
-
-
-def load_last_seen() -> dict:
-    try:
-        if STATE_FILE.exists():
-            return json.loads(STATE_FILE.read_text("utf-8"))
-    except (json.JSONDecodeError, OSError):
-        pass
-    return {}
-
-
-def save_last_seen(state: dict):
-    try:
-        STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        _write_private(STATE_FILE, json.dumps(state, indent=2))
-    except OSError as e:
-        logger.warning("Failed to save state: %s", e)
-
-
-# ── Inbox helpers ───────────────────────────────────────────────────
-
-
-def write_inbox(data: dict):
-    inbox_dir = BRIDGE_DIR / "inbox" / BRIDGE
-    inbox_dir.mkdir(parents=True, exist_ok=True)
-    msg_id = data.get("id", str(uuid.uuid4()))
-    path = inbox_dir / f"{msg_id}.json"
-    _write_private(path, json.dumps(data, ensure_ascii=False, indent=2))
-    logger.info("Wrote inbox: %s (from %s)", path, data.get("sender", "?"))
-
-
 def build_inbox_msg(raw: dict, room_name: str, room_token: str, chat_type: str) -> dict:
     return {
         "bridge": BRIDGE,
-        "id": str(raw.get("id", uuid.uuid4())),
+        "id": str(raw.get("id", "")),
         "sender": raw.get("actorId", ""),
         "sender_name": raw.get("actorDisplayName", ""),
         "text": raw.get("message", ""),
@@ -294,7 +212,7 @@ def poll_once(last_seen: dict) -> dict:
             if not str(raw.get("message", "")).strip():
                 continue
             try:
-                write_inbox(build_inbox_msg(raw, room_name, token, chat_type))
+                write_inbox_private(BRIDGE, build_inbox_msg(raw, room_name, token, chat_type))
             except Exception as e:
                 logger.error("Failed writing inbox for msg %s: %s", mid, e)
         if max_id > last_id:
@@ -303,54 +221,14 @@ def poll_once(last_seen: dict) -> dict:
 
 
 def inbound_loop():
-    last_seen = load_last_seen()
+    last_seen = load_last_seen(STATE_FILE)
     logger.info("Inbound polling started (every %.1fs)", POLL_INTERVAL)
     while True:
         try:
             last_seen = poll_once(last_seen)
-            save_last_seen(last_seen)
+            save_last_seen(last_seen, STATE_FILE)
         except Exception as e:
             logger.error("Inbound poll error: %s", e)
-        time.sleep(POLL_INTERVAL)
-
-
-# ── Outbox (outgoing) ───────────────────────────────────────────────
-
-
-def extract_token(target: str) -> str:
-    """Target is 'talk~<room_token>' (T-056), legacy 'talk:<room_token>',
-    or bare '<room_token>'. Return the token."""
-    for sep in ("~", ":"):
-        if sep in target:
-            head, _, _ = target.partition(sep)
-            if head == BRIDGE:
-                return target.split(sep, 1)[1].strip()
-    return target.strip()
-
-
-def outbox_loop():
-    outbox_dir = BRIDGE_DIR / "outbox" / BRIDGE
-    while True:
-        try:
-            for f in sorted(outbox_dir.glob("*.json"), key=lambda p: p.stat().st_mtime):
-                try:
-                    data = json.loads(f.read_text("utf-8"))
-                except (json.JSONDecodeError, OSError) as e:
-                    logger.warning("Invalid outbox JSON %s: %s", f, e)
-                    f.unlink(missing_ok=True)
-                    continue
-                if data.get("typing"):
-                    f.unlink(missing_ok=True)
-                    continue
-                token = extract_token(data.get("target", ""))
-                text = data.get("text", "")
-                if token and text:
-                    ok = send_message(token, text)
-                    if not ok:
-                        logger.warning("Failed to send to %s", token)
-                f.unlink(missing_ok=True)
-        except Exception as e:
-            logger.error("Outbox poll error: %s", e)
         time.sleep(POLL_INTERVAL)
 
 
@@ -363,26 +241,20 @@ def main():
             "Missing Nextcloud env vars (NEXTCLOUD_HOST/USERNAME/PASSWORD). Exiting."
         )
         return
-    logger.info("talk-wrapper starting — BRIDGE_DIR=%s, HOST=%s", BRIDGE_DIR, NC_HOST)
-    register_manifest()
-    write_status(connected=True)
+    logger.info("talk-wrapper starting — HOST=%s", NC_HOST)
 
-    threads = [
-        threading.Thread(target=inbound_loop, daemon=True, name="inbound"),
-        threading.Thread(target=outbox_loop, daemon=True, name="outbox"),
-    ]
-    for t in threads:
-        t.start()
-
-    try:
-        while True:
-            time.sleep(60)
-    except KeyboardInterrupt:
-        logger.info("Shutting down...")
-    finally:
-        write_status(connected=False, error="shutdown")
-        unregister_manifest()
-        logger.info("talk-wrapper stopped")
+    runner = BridgeRunner(
+        bridge=BRIDGE,
+        service="nextcloud-talk",
+        host=NC_HOST,
+        target_format=["chat_id"],
+        capabilities=["text"],
+        send=lambda target, text, attachments: send_message(target, text),
+        extra_threads=[lambda: __import__("threading").Thread(target=inbound_loop, daemon=True)],
+        poll_interval=POLL_INTERVAL,
+        logger_name="talk-wrapper",
+    )
+    runner.main()
 
 
 if __name__ == "__main__":

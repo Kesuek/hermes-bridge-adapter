@@ -24,6 +24,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "wrappers"))
 
 import adapter  # noqa: E402
 from adapter import BridgeAdapter  # noqa: E402
@@ -86,9 +87,6 @@ def _load_imsg_wrapper(tmp_path, monkeypatch):
     bridge_dir = tmp_path / "bridge"
     bridge_dir.mkdir()
     monkeypatch.setattr(w, "BRIDGE_DIR", bridge_dir)
-    monkeypatch.setattr(w, "STATUS_FILE", bridge_dir / "status" / "imsg" / "status.json")
-    monkeypatch.setattr(w, "STATE_FILE", bridge_dir / "state" / "imsg" / "last_seen.json")
-    monkeypatch.setattr(w, "MANIFEST_FILE", bridge_dir / "registry" / "imsg.yaml")
     return w
 
 
@@ -96,74 +94,99 @@ def _load_talk_wrapper(tmp_path, monkeypatch):
     w = _load_wrapper_module(ROOT / "wrappers" / "talk-wrapper.py", "talk_wrapper_hygiene")
     bridge_dir = tmp_path / "bridge"
     bridge_dir.mkdir()
-    monkeypatch.setattr(w, "BRIDGE_DIR", bridge_dir)
-    monkeypatch.setattr(w, "STATUS_FILE", bridge_dir / "status" / "talk" / "status.json")
-    monkeypatch.setattr(w, "STATE_FILE", bridge_dir / "state" / "talk" / "last_seen.json")
-    monkeypatch.setattr(w, "MANIFEST_FILE", bridge_dir / "registry" / "talk.yaml")
+    monkeypatch.setenv("BRIDGE_DIR", str(bridge_dir))
+    # Re-resolve the SDK's env-derived bridge dir for this test's tmp path.
+    import hermes_bridge_sdk.files as sdk_files
+    monkeypatch.setattr(sdk_files, "bridge_dir", lambda: bridge_dir)
     return w
 
 
 def test_imsg_wrapper_status_file_is_0600(tmp_path, monkeypatch):
-    """T-071: imsg-wrapper.write_status must produce a 0600 status.json."""
+    """T-071: imsg wrapper status heartbeat must produce a 0600 status.json."""
     w = _load_imsg_wrapper(tmp_path, monkeypatch)
-    w.write_status(connected=True)
-    mode = w.STATUS_FILE.stat().st_mode & 0o777
+    import hermes_bridge_sdk.files as sdk_files
+    monkeypatch.setattr(sdk_files, "bridge_dir", lambda: tmp_path / "bridge")
+    sdk_files.write_status("imsg", connected=True)
+    mode = (tmp_path / "bridge" / "status" / "imsg" / "status.json").stat().st_mode & 0o777
     assert mode == 0o600, f"status.json must be 0600, got {oct(mode)}"
 
 
 def test_imsg_wrapper_state_file_is_0600(tmp_path, monkeypatch):
     """T-071: imsg-wrapper.save_last_seen must produce a 0600 last_seen.json."""
     w = _load_imsg_wrapper(tmp_path, monkeypatch)
-    w.save_last_seen({"chat1": 100})
+    w.save_last_seen({"chat1": 100}, w.STATE_FILE)
     mode = w.STATE_FILE.stat().st_mode & 0o777
     assert mode == 0o600, f"last_seen.json must be 0600, got {oct(mode)}"
 
 
 def test_imsg_wrapper_manifest_file_is_0600(tmp_path, monkeypatch):
-    """T-071: imsg-wrapper.register_manifest must produce a 0600 manifest."""
+    """T-071: BridgeRunner.register must produce a 0600 manifest."""
     w = _load_imsg_wrapper(tmp_path, monkeypatch)
-    w.register_manifest()
-    mode = w.MANIFEST_FILE.stat().st_mode & 0o777
+    import hermes_bridge_sdk.files as sdk_files
+    monkeypatch.setattr(sdk_files, "bridge_dir", lambda: tmp_path / "bridge")
+    sdk_files.write_manifest(
+        "imsg", "imessage", "mac-mini-01",
+        ["email", "phone", "chat_id"], ["text", "attachments", "reactions"],
+        manifest_file=tmp_path / "bridge" / "registry" / "imsg.yaml",
+    )
+    mode = (tmp_path / "bridge" / "registry" / "imsg.yaml").stat().st_mode & 0o777
     assert mode == 0o600, f"manifest must be 0600, got {oct(mode)}"
 
 
 def test_imsg_wrapper_inbox_file_is_0600(tmp_path, monkeypatch):
-    """T-071: imsg-wrapper.write_inbox must produce a 0600 inbox file."""
-    w = _load_imsg_wrapper(tmp_path, monkeypatch)
-    w.write_inbox({"id": "msg1", "sender": "x", "text": "hi"})
+    """T-071: write_inbox_private must produce a 0600 inbox file."""
+    _load_imsg_wrapper(tmp_path, monkeypatch)
+    import hermes_bridge_sdk.files as sdk_files
+    monkeypatch.setattr(sdk_files, "bridge_dir", lambda: tmp_path / "bridge")
+    sdk_files.write_inbox_private(
+        "imsg", {"id": "msg1", "sender": "x", "text": "hi"},
+        inbox_dir=tmp_path / "bridge" / "inbox" / "imsg")
     p = tmp_path / "bridge" / "inbox" / "imsg" / "msg1.json"
     mode = p.stat().st_mode & 0o777
     assert mode == 0o600, f"inbox file must be 0600, got {oct(mode)}"
 
 
 def test_talk_wrapper_status_file_is_0600(tmp_path, monkeypatch):
-    """T-071: talk-wrapper.write_status must produce a 0600 status.json."""
-    w = _load_talk_wrapper(tmp_path, monkeypatch)
-    w.write_status(connected=True)
-    mode = w.STATUS_FILE.stat().st_mode & 0o777
+    """T-071: talk wrapper status heartbeat must produce a 0600 status.json."""
+    _load_talk_wrapper(tmp_path, monkeypatch)
+    import hermes_bridge_sdk.files as sdk_files
+    monkeypatch.setattr(sdk_files, "bridge_dir", lambda: tmp_path / "bridge")
+    sdk_files.write_status("talk", connected=True)
+    mode = (tmp_path / "bridge" / "status" / "talk" / "status.json").stat().st_mode & 0o777
     assert mode == 0o600, f"status.json must be 0600, got {oct(mode)}"
 
 
 def test_talk_wrapper_state_file_is_0600(tmp_path, monkeypatch):
-    """T-071: talk-wrapper.save_last_seen must produce a 0600 last_seen.json."""
-    w = _load_talk_wrapper(tmp_path, monkeypatch)
-    w.save_last_seen({"room1": 100})
-    mode = w.STATE_FILE.stat().st_mode & 0o777
+    """T-071: save_last_seen must produce a 0600 last_seen.json."""
+    _load_talk_wrapper(tmp_path, monkeypatch)
+    import hermes_bridge_sdk.files as sdk_files
+    monkeypatch.setattr(sdk_files, "bridge_dir", lambda: tmp_path / "bridge")
+    sdk_files.save_last_seen({"room1": 100}, tmp_path / "bridge" / "state" / "talk" / "last_seen.json")
+    mode = (tmp_path / "bridge" / "state" / "talk" / "last_seen.json").stat().st_mode & 0o777
     assert mode == 0o600, f"last_seen.json must be 0600, got {oct(mode)}"
 
 
 def test_talk_wrapper_manifest_file_is_0600(tmp_path, monkeypatch):
-    """T-071: talk-wrapper.register_manifest must produce a 0600 manifest."""
-    w = _load_talk_wrapper(tmp_path, monkeypatch)
-    w.register_manifest()
-    mode = w.MANIFEST_FILE.stat().st_mode & 0o777
+    """T-071: write_manifest must produce a 0600 manifest."""
+    _load_talk_wrapper(tmp_path, monkeypatch)
+    import hermes_bridge_sdk.files as sdk_files
+    monkeypatch.setattr(sdk_files, "bridge_dir", lambda: tmp_path / "bridge")
+    sdk_files.write_manifest(
+        "talk", "nextcloud-talk", "your-nextcloud.example.com",
+        ["chat_id"], ["text"],
+        manifest_file=tmp_path / "bridge" / "registry" / "talk.yaml",
+    )
+    mode = (tmp_path / "bridge" / "registry" / "talk.yaml").stat().st_mode & 0o777
     assert mode == 0o600, f"manifest must be 0600, got {oct(mode)}"
 
 
 def test_talk_wrapper_inbox_file_is_0600(tmp_path, monkeypatch):
-    """T-071: talk-wrapper.write_inbox must produce a 0600 inbox file."""
-    w = _load_talk_wrapper(tmp_path, monkeypatch)
-    w.write_inbox({"id": "msg1", "sender": "x", "text": "hi"})
+    """T-071: write_inbox_private must produce a 0600 inbox file."""
+    _load_talk_wrapper(tmp_path, monkeypatch)
+    import hermes_bridge_sdk.files as sdk_files
+    monkeypatch.setattr(sdk_files, "bridge_dir", lambda: tmp_path / "bridge")
+    sdk_files.write_inbox_private("talk", {"id": "msg1", "sender": "x", "text": "hi"},
+                                  inbox_dir=tmp_path / "bridge" / "inbox" / "talk")
     p = tmp_path / "bridge" / "inbox" / "talk" / "msg1.json"
     mode = p.stat().st_mode & 0o777
     assert mode == 0o600, f"inbox file must be 0600, got {oct(mode)}"
