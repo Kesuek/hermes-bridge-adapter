@@ -1,6 +1,10 @@
 # Writing a Bridge Wrapper
 
-A bridge wrapper is any script that connects a messaging platform (iMessage, Matrix, Telegram, WhatsApp, Nextcloud Talk, etc.) to the Hermes Bridge Adapter. It communicates **solely through JSON files** — no HTTP, no plugins, no special SDK.
+A bridge wrapper is any script that connects a messaging platform (iMessage, Matrix, Telegram, WhatsApp, Nextcloud Talk, etc.) to the Hermes Bridge Adapter. It communicates **solely through JSON files** — no HTTP, no plugins. The
+shared mechanics (manifest registration, status heartbeat, last_seen dedup,
+atomic inbox write, outbox loop) are provided by the `hermes_bridge_sdk`
+package that ships alongside the wrappers (see [SDK section](#hermes_bridge_sdk---shared-wrapper-sdk) below); a wrapper only implements
+platform-specific logic.
 
 ## How It Works
 
@@ -384,6 +388,32 @@ def main():
 if __name__ == "__main__":
     main()
 ```
+
+## hermes_bridge_sdk — Shared Wrapper SDK (T-090)
+
+`wrappers/hermes_bridge_sdk/` owns everything both platform wrappers used to
+duplicate (T-090). Wrappers provide only platform-specific logic:
+
+```python
+from hermes_bridge_sdk import (           # sys.path: bridge_dir
+    BridgeRunner, write_manifest, load_last_seen, save_last_seen,
+    write_inbox, strip_bridge_prefix, drain_outbox_once, outbox_loop,
+)
+```
+
+| Helper | Replaces (was duplicated in imsg- + talk-wrapper) |
+|---|---|
+| `write_manifest(name, service, host)` | registry self-registration/unregistration (`registry/<name>.yaml`) |
+| `write_status(...)` / heartbeat loop | `status/<name>/status.json` heartbeat (T-052 cadence) |
+| `load_last_seen` / `save_last_seen` | last_seen dedup state — **always reload before each poll** (T-091 RMW race) |
+| `write_inbox(...)` / `write_inbox_private` | atomic inbox write, `0600` perms (T-071), `~`-separator (T-056) |
+| `outbox_loop` / `drain_outbox_once` | outbox polling incl. `~`/legacy `:` prefix strip, typing-skip |
+| `BridgeRunner` | thin driver wiring transport hooks to the loops + heartbeat thread |
+
+Wrapper responsibilities shrink to: `build_inbox_msg` (platform → adapter
+message), `is_own` (self-message detection), `send` (adapter → platform),
+and the transport setup (AppleScript/dbus/HTTP…). See the existing wrappers
+for reference implementations.
 
 ## Reactions
 

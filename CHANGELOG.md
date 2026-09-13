@@ -35,6 +35,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **T-069/T-070:** Attachment media paths are canonicalized and confined to
   `bridge_dir`, rejecting absolute paths and `../`-traversal.
 
+### Added
+- **T-090:** Extracted the shared wrapper infrastructure into the
+  `wrappers/hermes_bridge_sdk/` package (`BridgeRunner`, manifest/status/
+  last_seen/inbox-writer/outbox-loop helpers). imsg-wrapper and talk-wrapper
+  now contain only platform-specific logic; the file contract to the adapter
+  is unchanged. Documented in `WRAPPER_GUIDE.md` (SDK section).
+
 ### Changed
 - **T-087:** `_handle_unified_command` now dispatches every `/unified`
   subcommand through a single dispatch dict of `_run_*` wrappers with a
