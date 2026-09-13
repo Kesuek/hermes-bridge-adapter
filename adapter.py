@@ -1005,177 +1005,142 @@ class BridgeAdapter(BasePlatformAdapter):
         sub = parts[1] if len(parts) > 1 else "help"
         args = parts[2:]
 
+        # T-087: the dispatch dict is the single dispatch mechanism — every
+        # subcommand maps to a ``_run_*`` wrapper with the uniform
+        # (bridge, data, args) -> str signature, so argument parsing and the
+        # exact usage strings live in one place per subcommand and can no
+        # longer drift between two dispatch sites.
         dispatch = {
-            "help": None,
-            "create": self._cmd_unified_create,
-            "status": self._cmd_unified_status,
-            "join": self._cmd_unified_join,
-            "leave": self._cmd_unified_leave,
-            "exit": self._cmd_unified_exit,
-            "members": self._cmd_unified_members,
-            "mode": self._cmd_unified_mode,
-            "switch": self._cmd_unified_switch,
-            "send": self._cmd_unified_send,
-            "identity": None,
-            "set": None,
-            "protokoll": None,
+            "help": self._run_help,
+            "create": self._run_create,
+            "status": self._run_status,
+            "join": self._run_join,
+            "leave": self._run_leave,
+            "exit": self._run_exit,
+            "members": self._run_members,
+            "mode": self._run_mode,
+            "switch": self._run_switch,
+            "send": self._run_send,
+            "identity": self._run_identity,
+            "set": self._run_set,
+            "protokoll": self._run_protokoll,
         }
         handler = dispatch.get(sub)
-        if sub == "help":
-            await self._send_reply(bridge, data, self._unified_help_text())
-        elif sub == "identity":
-            # /unified identity claim <bridge>~<target>
-            # /unified identity confirm <code>
-            action = args[0] if args else ""
-            if action == "claim":
-                target = args[1] if len(args) > 1 else ""
-                if not target:
-                    await self._send_reply(
-                        bridge, data,
-                        "Usage: /unified identity claim <bridge>~<target>",
-                    )
-                else:
-                    await self._send_reply(
-                        bridge, data,
-                        await self._cmd_unified_identity_claim(bridge, data, target),
-                    )
-            elif action == "confirm":
-                code = args[1] if len(args) > 1 else ""
-                if not code:
-                    await self._send_reply(
-                        bridge, data, "Usage: /unified identity confirm <code>"
-                    )
-                else:
-                    await self._send_reply(
-                        bridge, data,
-                        self._cmd_unified_identity_confirm(bridge, data, code),
-                    )
-            else:
-                await self._send_reply(
-                    bridge, data,
-                    "Usage: /unified identity <claim|confirm> ...",
-                )
-        elif sub == "set":
-            # /unified set username <name>
-            field = args[0] if args else ""
-            if field == "username":
-                name = " ".join(args[1:]) if len(args) > 1 else ""
-                if not name:
-                    await self._send_reply(
-                        bridge, data, "Usage: /unified set username <name>"
-                    )
-                else:
-                    await self._send_reply(
-                        bridge, data,
-                        self._cmd_unified_set_username(bridge, data, name),
-                    )
-            else:
-                await self._send_reply(
-                    bridge, data,
-                    "Usage: /unified set username <name>",
-                )
-        elif sub == "protokoll":
-            # /unified protokoll open <thread> [sitzung]
-            # /unified protokoll close <thread>
-            action = args[0] if args else ""
-            name = args[1] if len(args) > 1 else ""
-            if action == "open":
-                sitzung = args[2] if len(args) > 2 else ""
-                if not name:
-                    await self._send_reply(
-                        bridge, data, "Usage: /unified protokoll open <name> [sitzung]"
-                    )
-                else:
-                    await self._send_reply(
-                        bridge, data,
-                        self._cmd_unified_protokoll_open(bridge, data, name, sitzung),
-                    )
-            elif action == "close":
-                if not name:
-                    await self._send_reply(
-                        bridge, data, "Usage: /unified protokoll close <name>"
-                    )
-                else:
-                    await self._send_reply(
-                        bridge, data,
-                        self._cmd_unified_protokoll_close(bridge, data, name),
-                    )
-            else:
-                await self._send_reply(
-                    bridge, data,
-                    "Usage: /unified protokoll <open|close> <name> [sitzung]",
-                )
-        elif handler is None:
+        if handler is None:
             await self._send_reply(
                 bridge, data,
                 f"Unknown /unified command '{sub}'. Try /unified help.",
             )
-        elif sub == "status":
-            await self._send_reply(bridge, data, self._cmd_unified_status(bridge, data))
-        elif sub == "create":
-            name = args[0] if args else ""
-            if not name:
-                await self._send_reply(bridge, data, "Usage: /unified create <name>")
-            else:
-                await self._send_reply(bridge, data, self._cmd_unified_create(bridge, data, name))
-        elif sub == "join":
-            name = args[0] if args else ""
-            if not name:
-                await self._send_reply(bridge, data, "Usage: /unified join <name>")
-            else:
-                await self._send_reply(bridge, data, self._cmd_unified_join(bridge, data, name))
-        elif sub == "leave":
-            name = args[0] if args else ""
-            if not name:
-                await self._send_reply(bridge, data, "Usage: /unified leave <name>")
-            else:
-                await self._send_reply(bridge, data, self._cmd_unified_leave(bridge, data, name))
-        elif sub == "exit":
-            await self._send_reply(bridge, data, self._cmd_unified_exit(bridge, data))
-        elif sub == "members":
-            name = args[0] if args else ""
-            if not name:
-                await self._send_reply(bridge, data, "Usage: /unified members <name>")
-            else:
-                await self._send_reply(bridge, data, self._cmd_unified_members(bridge, data, name))
-        elif sub == "mode":
-            name = args[0] if args else ""
-            mode = args[1] if len(args) > 1 else ""
-            if not name or not mode:
-                await self._send_reply(
-                    bridge, data,
-                    "Usage: /unified mode <name> <participant|reactive|off|silent|protokoll>",
-                )
-            else:
-                await self._send_reply(
-                    bridge, data, self._cmd_unified_mode(bridge, data, name, mode)
-                )
-        elif sub == "switch":
-            name = args[0] if args else ""
-            if not name:
-                await self._send_reply(bridge, data, "Usage: /unified switch <name>")
-            else:
-                await self._send_reply(
-                    bridge, data, self._cmd_unified_switch(bridge, data, name)
-                )
-        elif sub == "send":
-            name = args[0] if args else ""
-            message = " ".join(args[1:]) if len(args) > 1 else ""
-            if not name or not message:
-                await self._send_reply(
-                    bridge, data, "Usage: /unified send <name> <message>"
-                )
-            else:
-                await self._send_reply(
-                    bridge, data,
-                    await self._cmd_unified_send(bridge, data, name, message),
-                )
+        else:
+            await self._send_reply(bridge, data, await handler(bridge, data, args))
 
         # Remove the processed inbox file.
         try:
             filepath.unlink()
         except OSError:
             pass
+
+    # ── /unified subcommand wrappers (T-087) ─────────────────────────
+    #
+    # One wrapper per subcommand with the uniform signature
+    # (bridge, data, args) -> str. Each owns its argument parsing and the
+    # exact usage strings; sync _cmd_* results are returned directly (an
+    # async wrapper returning a str is awaited to a str by the caller).
+
+    async def _run_help(self, bridge: str, data: dict, args: list) -> str:
+        return self._unified_help_text()
+
+    async def _run_create(self, bridge: str, data: dict, args: list) -> str:
+        name = args[0] if args else ""
+        if not name:
+            return "Usage: /unified create <name>"
+        return self._cmd_unified_create(bridge, data, name)
+
+    async def _run_status(self, bridge: str, data: dict, args: list) -> str:
+        return self._cmd_unified_status(bridge, data)
+
+    async def _run_join(self, bridge: str, data: dict, args: list) -> str:
+        name = args[0] if args else ""
+        if not name:
+            return "Usage: /unified join <name>"
+        return self._cmd_unified_join(bridge, data, name)
+
+    async def _run_leave(self, bridge: str, data: dict, args: list) -> str:
+        name = args[0] if args else ""
+        if not name:
+            return "Usage: /unified leave <name>"
+        return self._cmd_unified_leave(bridge, data, name)
+
+    async def _run_exit(self, bridge: str, data: dict, args: list) -> str:
+        return self._cmd_unified_exit(bridge, data)
+
+    async def _run_members(self, bridge: str, data: dict, args: list) -> str:
+        name = args[0] if args else ""
+        if not name:
+            return "Usage: /unified members <name>"
+        return self._cmd_unified_members(bridge, data, name)
+
+    async def _run_mode(self, bridge: str, data: dict, args: list) -> str:
+        name = args[0] if args else ""
+        mode = args[1] if len(args) > 1 else ""
+        if not name or not mode:
+            return "Usage: /unified mode <name> <participant|reactive|off|silent|protokoll>"
+        return self._cmd_unified_mode(bridge, data, name, mode)
+
+    async def _run_switch(self, bridge: str, data: dict, args: list) -> str:
+        name = args[0] if args else ""
+        if not name:
+            return "Usage: /unified switch <name>"
+        return self._cmd_unified_switch(bridge, data, name)
+
+    async def _run_send(self, bridge: str, data: dict, args: list) -> str:
+        name = args[0] if args else ""
+        message = " ".join(args[1:]) if len(args) > 1 else ""
+        if not name or not message:
+            return "Usage: /unified send <name> <message>"
+        return await self._cmd_unified_send(bridge, data, name, message)
+
+    async def _run_identity(self, bridge: str, data: dict, args: list) -> str:
+        # /unified identity claim <bridge>~<target>
+        # /unified identity confirm <code>
+        action = args[0] if args else ""
+        if action == "claim":
+            target = args[1] if len(args) > 1 else ""
+            if not target:
+                return "Usage: /unified identity claim <bridge>~<target>"
+            return await self._cmd_unified_identity_claim(bridge, data, target)
+        if action == "confirm":
+            code = args[1] if len(args) > 1 else ""
+            if not code:
+                return "Usage: /unified identity confirm <code>"
+            return self._cmd_unified_identity_confirm(bridge, data, code)
+        return "Usage: /unified identity <claim|confirm> ..."
+
+    async def _run_set(self, bridge: str, data: dict, args: list) -> str:
+        # /unified set username <name>
+        field = args[0] if args else ""
+        if field == "username":
+            name = " ".join(args[1:]) if len(args) > 1 else ""
+            if not name:
+                return "Usage: /unified set username <name>"
+            return self._cmd_unified_set_username(bridge, data, name)
+        return "Usage: /unified set username <name>"
+
+    async def _run_protokoll(self, bridge: str, data: dict, args: list) -> str:
+        # /unified protokoll open <thread> [sitzung]
+        # /unified protokoll close <thread>
+        action = args[0] if args else ""
+        name = args[1] if len(args) > 1 else ""
+        if action == "open":
+            sitzung = args[2] if len(args) > 2 else ""
+            if not name:
+                return "Usage: /unified protokoll open <name> [sitzung]"
+            return self._cmd_unified_protokoll_open(bridge, data, name, sitzung)
+        if action == "close":
+            if not name:
+                return "Usage: /unified protokoll close <name>"
+            return self._cmd_unified_protokoll_close(bridge, data, name)
+        return "Usage: /unified protokoll <open|close> <name> [sitzung]"
 
     @staticmethod
     def _unified_help_text() -> str:

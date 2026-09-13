@@ -35,6 +35,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **T-069/T-070:** Attachment media paths are canonicalized and confined to
   `bridge_dir`, rejecting absolute paths and `../`-traversal.
 
+### Changed
+- **T-087:** `_handle_unified_command` now dispatches every `/unified`
+  subcommand through a single dispatch dict of `_run_*` wrappers with a
+  uniform `(bridge, data, args) -> str` signature. Previously each
+  subcommand existed in two places (a dispatch dict entry plus an `if/elif`
+  branch), so the two could drift apart. Behavior, help text, aliases, and
+  usage strings are unchanged.
+
 ### Fixed
 - **T-078:** `reply_map` now prunes entries older than 7 days (and caps at
   5000) on save. Previously every inbound appended an entry and every save
