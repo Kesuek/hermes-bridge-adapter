@@ -349,6 +349,10 @@ def history_loop():
     logger.info("History safety net started (every %.1fs)", HISTORY_POLL_INTERVAL)
     while True:
         try:
+            # T-091: re-read the state file before every poll — the watch
+            # loop bumps last_seen concurrently, and saving a stale local
+            # dict would roll the watch's bump back (read-modify-write race).
+            last_seen = load_last_seen(STATE_FILE)
             last_seen = poll_history_once(last_seen)
             save_last_seen(last_seen, STATE_FILE)
         except Exception as e:

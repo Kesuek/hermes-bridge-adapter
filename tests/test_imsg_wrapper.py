@@ -13,6 +13,9 @@ import subprocess
 import sys
 from pathlib import Path
 
+import threading
+import time as _time
+
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -184,4 +187,45 @@ def test_history_poll_skips_watch_seen_messages(monkeypatch, tmp_path):
     assert not written, (
         "history poll must not re-deliver a message the watch loop "
         f"already delivered (T-091); wrote: {written}"
+    )
+
+
+def test_history_loop_rereads_state_each_poll(monkeypatch, tmp_path):
+    """T-091 (follow-up): history_loop must reload the state file before
+    every poll — the watch loop bumps last_seen concurrently, and saving a
+    stale local dict rolls the bump back (read-modify-write race that
+    re-delivered msg 3481 in production)."""
+    w = _load_w()
+    state_file = tmp_path / "state" / "last_seen.json"
+    monkeypatch.setattr(w, "STATE_FILE", state_file)
+    _patch_no_subprocess(monkeypatch)
+
+    # Watch loop bumps 3481 into the state file before the first poll runs.
+    w.save_last_seen({"4": 3481}, w.STATE_FILE)
+    seen_states = []
+
+    def fake_poll(ls):
+        seen_states.append(dict(ls))
+        return ls
+
+    monkeypatch.setattr(w, "poll_history_once", fake_poll)
+
+    # Run exactly one iteration by raising after the first save.
+    import threading as _t
+
+    done = _t.Event()
+    orig_save = w.save_last_seen
+
+    def save_then_stop(state, path):
+        orig_save(state, path)
+        done.set()
+        raise KeyboardInterrupt  # exit history_loop
+
+    monkeypatch.setattr(w, "save_last_seen", save_then_stop)
+    th = _t.Thread(target=w.history_loop, daemon=True)
+    th.start()
+    th.join(timeout=2)
+
+    assert seen_states and seen_states[0].get("4") == 3481, (
+        f"history_loop must re-read the state file before polling, saw: {seen_states}"
     )
