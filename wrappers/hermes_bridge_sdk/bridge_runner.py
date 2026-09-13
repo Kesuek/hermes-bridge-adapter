@@ -75,7 +75,16 @@ class BridgeRunner:
         self.register()
         write_status(self.bridge, connected=True)
 
+        from .loops import heartbeat_loop
+
         threads = [t() for t in self.extra_threads]
+        threads.append(threading.Thread(
+            target=heartbeat_loop,
+            args=(self.bridge,),
+            kwargs={"interval": self.heartbeat_interval},
+            daemon=True,
+            name=f"{self.bridge}-heartbeat",
+        ))
         outbox = threading.Thread(
             target=drain_outbox_once,
             args=(self.bridge, self.send, self.poll_interval),
