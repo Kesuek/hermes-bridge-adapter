@@ -1,12 +1,10 @@
 # Writing a Bridge Wrapper
 
-A bridge wrapper is any script that connects a messaging platform (iMessage, Matrix, Telegram, WhatsApp, Nextcloud Talk, etc.) to the Hermes Bridge Adapter. It communicates **solely through JSON files** — no HTTP, no plugins. The
-shared mechanics (manifest registration, status heartbeat, last_seen dedup,
-atomic inbox write, outbox loop) are provided by the `hermes_bridge_sdk`
-package that ships alongside the wrappers (see [SDK section](#hermes_bridge_sdk---shared-wrapper-sdk) below); a wrapper only implements
-platform-specific logic.
+A bridge wrapper is any script that connects a messaging platform (iMessage, Matrix, Telegram, WhatsApp, Nextcloud Talk, etc.) to the Hermes Bridge Adapter. It communicates **solely through JSON files** — no HTTP, no plugins.
 
-## How It Works
+Most of the plumbing (registry manifest, status heartbeat, last_seen dedup, atomic inbox write, outbox loop) is provided by the `hermes_bridge_sdk` package — **start with the SDK** (section 1). The raw file contract is documented in the appendix for debugging and for SDK-free wrappers.
+
+## Quick Overview
 
 ```
 ┌─────────────────────────────────────────────────────┐
@@ -22,420 +20,160 @@ platform-specific logic.
 │   │  platform API │     │  <bridge>/        │          │
 │   └──────────────┘     └──────────────────┘          │
 │                                                      │
-│   ┌──────────────────────────────────────┐           │
-│   │  Write status/<bridge>/status.json   │           │
-│   └──────────────────────────────────────┘           │
+│   (manifest/status/heartbeat: SDK handles this)      │
 └─────────────────────────────────────────────────────┘
 ```
-
-## Directory Structure
 
 Each bridge gets its own namespace under the bridge directory:
 
 ```
 <bridge_dir>/
-├── inbox/<bridge>/       ← You write incoming messages here
-├── outbox/<bridge>/      ← Adapter writes outgoing messages here (you read)
-├── status/<bridge>/      ← You write health status here
+├── registry/<bridge>.yaml  ← SDK writes this (manifest = registered)
+├── inbox/<bridge>/         ← You write incoming messages here
+├── outbox/<bridge>/        ← Adapter writes outgoing messages here (you read)
+├── status/<bridge>/        ← SDK writes the health heartbeat here
+├── state/<bridge>/         ← SDK stores last_seen dedup state here
 └── media/
     ├── <bridge>/incoming/  ← Incoming attachments (you copy here)
     └── <bridge>/outgoing/  ← Outgoing attachments (adapter copies here)
 ```
 
-## Self-Registration (Registry)
+## 1. Writing a Wrapper with the SDK
 
-A bridge registers itself by dropping a manifest into `registry/`. The
-adapter polls `registry/` and reconciles at runtime:
+### Your four hooks
 
-- **Manifest present** → bridge registered; `inbox/`, `outbox/`, `status/`,
-  `media/` directories are created automatically.
-- **Manifest removed** (`rm registry/<bridge>.yaml`) → bridge deregistered;
-  `status/`/`media/` are cleaned up.
+A wrapper implements only platform-specific logic and hands it to `BridgeRunner`:
 
-```yaml
-# registry/imsg.yaml
-name: imsg
-service: imessage
-host: mac-mini-01
-target_format: [email, phone, chat_id]   # which target shapes this bridge accepts
-capabilities: [text, attachments, reactions]
-```
+| Hook | Signature | Purpose |
+|---|---|---|
+| `send` | `(target, text, attachments) -> None` | Deliver an outbox message via the platform API |
+| `build_inbox_msg` | platform-native event → inbox dict | Map platform fields to the adapter's inbox JSON (see appendix for the schema) |
+| `is_own` | platform-native event → bool | Detect self-echo / system messages that must not be mirrored |
+| inbound loop | a `Thread` (via `extra_threads`) | Poll or stream the platform; call `write_inbox_private()` per message |
 
-The wrapper should write its manifest on startup and remove it on shutdown,
-so the adapter registers/deregisters the bridge automatically.
-
-## Wrapper Responsibilities
-
-A wrapper must do four things:
-
-### 1. Poll Outbox (read messages from Hermes)
-
-Watch `outbox/<bridge>/` for new JSON files. When one appears:
-
-```python
-import json
-from pathlib import Path
-
-BRIDGE_DIR = Path("/path/to/bridge")
-BRIDGE = "mybridge"
-
-def poll_outbox():
-    outbox_dir = BRIDGE_DIR / "outbox" / BRIDGE
-    for f in sorted(outbox_dir.glob("*.json"), key=lambda p: p.stat().st_mtime):
-        data = json.loads(f.read_text("utf-8"))
-        send_via_platform(data)
-        f.unlink(missing_ok=True)  # Delete after sending
-```
-
-**Outbox JSON format:**
-
-```json
-{
-  "id": "out_abc123",
-  "target": "user_or_chat_id",
-  "text": "Hello from Hermes!",
-  "attachments": [
-    {
-      "type": "image",
-      "path": "media/mybridge/outgoing/photo.jpg",
-      "caption": "Optional caption"
-    }
-  ],
-  "typing": false,
-  "reply_to": "msg_001",
-  "thread_id": "thread_001",
-  "metadata": {}
-}
-```
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `id` | string | Unique message ID |
-| `target` | string | Chat ID or recipient (platform-specific) |
-| `text` | string | Message text (may be empty if only attachment) |
-| `attachments` | array | List of attachment objects (see below) |
-| `typing` | bool | If true, show typing indicator (no text/attachments) |
-| `reply_to` | string? | ID of message being replied to |
-| `thread_id` | string? | Thread ID for threaded conversations |
-| `metadata` | object | Platform-specific extras |
-
-**Attachment object:**
-
-```json
-{
-  "type": "image|video|audio|document",
-  "path": "relative/path/in/bridge/dir",
-  "caption": "Optional description"
-}
-```
-
-### 2. Write Inbox (send messages to Hermes)
-
-When a message arrives from the platform, write it as JSON to `inbox/<bridge>/`:
-
-```python
-import json
-import uuid
-from pathlib import Path
-
-def write_inbox(sender, text, chat_id, chat_name="", attachments=None, reply_to=None, thread_id=None, thread_root=None):
-    inbox_dir = BRIDGE_DIR / "inbox" / BRIDGE
-    inbox_dir.mkdir(parents=True, exist_ok=True)
-
-    msg = {
-        "id": str(uuid.uuid4()),
-        "type": "message",
-        "sender": sender,
-        "sender_name": sender,
-        "text": text,
-        "chat": {
-            "id": chat_id,
-            "type": "direct",       # "direct" or "group"
-            "name": chat_name,
-        },
-        "attachments": attachments or [],
-        "reply_to": reply_to,
-        "thread_id": thread_id,
-        "thread_root": thread_root,
-    }
-
-    path = inbox_dir / f"{msg['id']}.json"
-    path.write_text(json.dumps(msg, ensure_ascii=False, indent=2), "utf-8")
-```
-
-**Inbox JSON format:**
-
-```json
-{
-  "id": "msg_abc123",
-  "type": "message",
-  "sender": "user_42",
-  "sender_name": "Alice",
-  "text": "Hello Hermes!",
-  "chat": {
-    "id": "chat_99",
-    "type": "direct",
-    "name": "Alice"
-  },
-  "attachments": [
-    {
-      "type": "image",
-      "path": "media/mybridge/incoming/photo.jpg",
-      "mime": "image/jpeg"
-    }
-  ],
-  "reply_to": {
-    "id": "msg_001",
-    "text": "Previous message"
-  },
-  "thread_id": "thread_001",
-  "thread_root": "msg_001"
-}
-```
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `id` | string | ✅ | Unique message ID |
-| `type` | string | ✅ | `"message"` or `"reaction"` |
-| `sender` | string | ✅ | User ID (used for routing) |
-| `sender_name` | string | | Display name |
-| `text` | string | | Message text |
-| `chat.id` | string | ✅ | **Raw chat identity** (no bridge prefix), e.g. `"chat_99"` |
-| `chat.type` | string | | `"direct"` (default) or `"group"` |
-| `chat.name` | string | | Human-readable chat name |
-| `attachments` | array | | List of attachment objects |
-| `reply_to` | object | | `{ "id": "...", "text": "..." }` |
-| `thread_id` | string | | Thread identifier |
-| `thread_root` | string | | Root message ID of the thread |
-
-**⚠️ Important: The `chat.id` must be the RAW chat identity** (e.g. `"chat_99"`), **without** a bridge prefix. The adapter builds the full routable reply address (`<bridge>~<target>`) itself. If you include a prefix, the adapter would double-prefix it and replies would fail to route. The wrapper stays agnostic of the addressing convention.
-
-### 3. Handle Attachments
-
-**Incoming** (platform → Hermes): Copy the file to `media/<bridge>/incoming/` and reference it with a relative path in the inbox JSON:
-
-```python
-import shutil
-
-def handle_incoming_attachment(file_path):
-    target = BRIDGE_DIR / "media" / BRIDGE / "incoming" / Path(file_path).name
-    target.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(file_path, target)
-    return {
-        "type": "image",
-        "path": str(target.relative_to(BRIDGE_DIR)),
-        "mime": "image/jpeg",
-    }
-```
-
-**Outgoing** (Hermes → platform): The adapter copies files to `media/<bridge>/outgoing/`. Your wrapper reads the relative path from the outbox JSON, resolves it, and sends the file via the platform API:
-
-```python
-def send_attachment(att):
-    att_path = BRIDGE_DIR / att["path"]
-    if att_path.exists():
-        platform_send_file(chat_id, att_path)
-```
-
-### 4. Report Status
-
-Write a status file so the adapter can monitor bridge health:
-
-```python
-import time
-
-def write_status(connected, error=None):
-    status_dir = BRIDGE_DIR / "status" / BRIDGE
-    status_dir.mkdir(parents=True, exist_ok=True)
-    status = {
-        "bridge": BRIDGE,
-        "connected": connected,
-        "last_seen": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-        "error": error,
-    }
-    (status_dir / "status.json").write_text(
-        json.dumps(status, indent=2), "utf-8"
-    )
-```
-
-## Complete Minimal Wrapper
-
-Here's a complete working wrapper skeleton:
+### Complete minimal wrapper
 
 ```python
 #!/usr/bin/env python3
-"""Minimal bridge wrapper template."""
-import json
-import logging
-import os
-import time
-import uuid
+"""Minimal SDK-based bridge wrapper (~40 lines of real logic)."""
+import json, logging, os, sys, threading, time, uuid
 from pathlib import Path
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("mybridge-wrapper")
-
-BRIDGE_DIR = Path(os.environ.get("BRIDGE_DIR", str(Path.home() / ".hermes" / "bridge")))
 BRIDGE = "mybridge"
-POLL_INTERVAL = 1.0
+sys.path.insert(0, str(Path(__file__).resolve().parent))  # SDK lives in wrappers/
 
+from hermes_bridge_sdk import BridgeRunner, load_last_seen, save_last_seen, write_inbox_private
 
-def send_via_platform(data):
-    """Send a message using the platform's API."""
-    target = data.get("target", "")
-    text = data.get("text", "")
-    attachments = data.get("attachments", [])
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+log = logging.getLogger("mybridge-wrapper")
 
-    # TODO: Implement platform-specific sending
-    logger.info("Would send to %s: %.80s", target, text)
+STATE_FILE = Path(os.environ.get("BRIDGE_DIR", str(Path.home() / ".hermes" / "bridge"))) / "state" / BRIDGE / "last_seen.json"
 
-    for att in attachments:
-        att_path = BRIDGE_DIR / att.get("path", "")
-        if att_path.exists():
-            logger.info("Would send attachment: %s", att_path)
+def send(target: str, text: str, attachments) -> None:
+    # TODO: deliver via the platform's API; attachments carry paths relative
+    # to the bridge dir (see appendix). The SDK already stripped any
+    # "mybridge~" prefix from target and consumed typing markers.
+    log.info("Would send to %s: %s", target, text[:80])
 
+def poll_platform(state: dict) -> dict:
+    """Poll the platform once; write new messages; return updated last_seen."""
+    last = state.get("cursor", 0)
+    for raw in platform_fetch_since(last):          # TODO: platform API
+        if is_own(raw):
+            continue
+        write_inbox_private(BRIDGE, {
+            "id": str(raw["id"]),
+            "type": "message",
+            "sender": raw["sender"],
+            "sender_name": raw.get("name", ""),
+            "text": raw["text"],
+            "chat": {"id": raw["chat_id"], "type": "direct", "name": raw.get("chat_name", "")},
+            "attachments": [],
+            "reply_to": None,
+        })
+        last = max(last, raw["id"])
+    state["cursor"] = last
+    return state
 
-def poll_outbox():
-    """Poll outbox/ and send pending messages."""
-    outbox_dir = BRIDGE_DIR / "outbox" / BRIDGE
+def is_own(raw: dict) -> bool:
+    return raw["sender"] == PLATFORM_SELF_USER      # TODO
+
+def inbound_loop():
+    # T-091 lesson: reload state before EVERY poll — a stale in-memory dict
+    # rolls back updates from other loops (watch/history races).
     while True:
         try:
-            for f in sorted(outbox_dir.glob("*.json"), key=lambda p: p.stat().st_mtime):
-                try:
-                    data = json.loads(f.read_text("utf-8"))
-                except (json.JSONDecodeError, OSError):
-                    f.unlink(missing_ok=True)
-                    continue
-
-                if data.get("typing"):
-                    f.unlink(missing_ok=True)
-                    continue
-
-                send_via_platform(data)
-                f.unlink(missing_ok=True)
+            save_last_seen(poll_platform(load_last_seen(STATE_FILE)), STATE_FILE)
         except Exception as e:
-            logger.error("Outbox poll error: %s", e)
-        time.sleep(POLL_INTERVAL)
-
-
-def listen_for_messages():
-    """Listen for incoming messages from the platform."""
-    # TODO: Implement platform-specific message listening
-    # When a message arrives, call write_inbox()
-    pass
-
-
-def write_inbox(sender, text, chat_id, chat_name="", attachments=None,
-                reply_to=None, thread_id=None, thread_root=None):
-    """Write an incoming message to inbox/<bridge>/."""
-    inbox_dir = BRIDGE_DIR / "inbox" / BRIDGE
-    inbox_dir.mkdir(parents=True, exist_ok=True)
-
-    msg_id = str(uuid.uuid4())
-    msg = {
-        "id": msg_id,
-        "type": "message",
-        "sender": sender,
-        "sender_name": sender,
-        "text": text,
-        "chat": {
-            "id": chat_id,
-            "type": "direct",
-            "name": chat_name or chat_id,
-        },
-        "attachments": attachments or [],
-        "reply_to": reply_to,
-        "thread_id": thread_id,
-        "thread_root": thread_root,
-    }
-
-    path = inbox_dir / f"{msg_id}.json"
-    path.write_text(json.dumps(msg, ensure_ascii=False, indent=2), "utf-8")
-    logger.debug("Wrote inbox: %s", path)
-
-
-def write_status(connected, error=None):
-    """Write bridge health status."""
-    status_dir = BRIDGE_DIR / "status" / BRIDGE
-    status_dir.mkdir(parents=True, exist_ok=True)
-    status = {
-        "bridge": BRIDGE,
-        "connected": connected,
-        "last_seen": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-        "error": error,
-    }
-    (status_dir / "status.json").write_text(
-        json.dumps(status, indent=2), "utf-8"
-    )
-
-
-def main():
-    logger.info("Wrapper starting — BRIDGE_DIR=%s, BRIDGE=%s", BRIDGE_DIR, BRIDGE)
-    write_status(connected=True)
-
-    import threading
-    t = threading.Thread(target=poll_outbox, daemon=True, name="outbox-poller")
-    t.start()
-
-    try:
-        listen_for_messages()
-    except KeyboardInterrupt:
-        logger.info("Shutting down...")
-    finally:
-        write_status(connected=False, error="shutdown")
-
+            log.error("Inbound poll error: %s", e)
+        time.sleep(float(os.environ.get("BRIDGE_POLL_INTERVAL", "1.0")))
 
 if __name__ == "__main__":
-    main()
+    BridgeRunner(
+        bridge=BRIDGE,
+        service="mybridge-service",
+        host="my-host.example.com",
+        target_format=["chat_id"],
+        capabilities=["text"],
+        send=send,
+        extra_threads=[lambda: threading.Thread(target=inbound_loop, daemon=True)],
+        poll_interval=float(os.environ.get("BRIDGE_POLL_INTERVAL", "1.0")),
+    ).main()   # registers manifest, starts outbox+heartbeat+your threads, blocks, cleans up on SIGINT/SIGTERM
 ```
 
-## hermes_bridge_sdk — Shared Wrapper SDK (T-090)
+That's the whole wrapper. The runner registers the manifest on startup (adapter creates the directory tree), writes the status heartbeat every 60 s on its own thread, drains the outbox (mtime-sorted, typing-skip, `~`-prefix strip, unlink after send), and unregisters cleanly on shutdown.
 
-`wrappers/hermes_bridge_sdk/` owns everything both platform wrappers used to
-duplicate (T-090). Wrappers provide only platform-specific logic:
+### SDK helper reference
 
 ```python
-from hermes_bridge_sdk import (           # sys.path: bridge_dir
-    BridgeRunner, write_manifest, load_last_seen, save_last_seen,
-    write_inbox, strip_bridge_prefix, drain_outbox_once, outbox_loop,
+from hermes_bridge_sdk import (
+    BridgeRunner, write_manifest, unregister_manifest, write_status,
+    load_last_seen, save_last_seen, write_inbox, write_inbox_private,
+    strip_bridge_prefix, drain_outbox_once, outbox_loop, heartbeat_loop,
 )
 ```
 
-| Helper | Replaces (was duplicated in imsg- + talk-wrapper) |
+| Helper | What it does |
 |---|---|
-| `write_manifest(name, service, host)` | registry self-registration/unregistration (`registry/<name>.yaml`) |
-| `write_status(...)` / heartbeat loop | `status/<name>/status.json` heartbeat (T-052 cadence) |
-| `load_last_seen` / `save_last_seen` | last_seen dedup state — **always reload before each poll** (T-091 RMW race) |
-| `write_inbox(...)` / `write_inbox_private` | atomic inbox write, `0600` perms (T-071), `~`-separator (T-056) |
-| `outbox_loop` / `drain_outbox_once` | outbox polling incl. `~`/legacy `:` prefix strip, typing-skip |
-| `BridgeRunner` | thin driver wiring transport hooks to the loops + heartbeat thread |
+| `BridgeRunner(...).main()` | Lifecycle owner: manifest register/unregister, status heartbeat thread, outbox poll thread, your `extra_threads`, signal handling |
+| `write_manifest(bridge, service, host, target_format, capabilities)` | Registry self-registration → `registry/<bridge>.yaml` (0600) |
+| `write_status(bridge, connected, error=None)` | Health heartbeat payload → `status/<bridge>/status.json` |
+| `heartbeat_loop(bridge, interval=60.0)` | Status refresh on its own thread (T-052: a stream's read loop blocks stdin, so the heartbeat needs its own thread) |
+| `load_last_seen(file)` / `save_last_seen(state, file)` | last_seen dedup state — **always reload before each poll** (T-091 RMW race: a stale dict rolls back other loops' bumps → duplicate deliveries) |
+| `write_inbox_private(bridge, data)` / `write_inbox` | Atomic inbox write with `0600` perms (T-071); `write_inbox` is the backwards-compatible alias |
+| `strip_bridge_prefix(target, bridge)` | Strips `mybridge~` (T-056) or legacy `mybridge:` so the wrapper stays agnostic of addressing |
+| `drain_outbox_once(bridge, send, interval, once=)` / `outbox_loop` | Outbox polling: mtime-sorted glob, invalid-JSON drop, typing-skip, send via your `send`, unlink after (at-least-once) |
 
-Wrapper responsibilities shrink to: `build_inbox_msg` (platform → adapter
-message), `is_own` (self-message detection), `send` (adapter → platform),
-and the transport setup (AppleScript/dbus/HTTP…). See the existing wrappers
-for reference implementations.
+Configuration via environment variables:
 
-## Reactions
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `BRIDGE_DIR` | `~/.hermes/bridge` | Path to the bridge directory |
+| `BRIDGE_POLL_INTERVAL` | `1.0` | Outbox/inbound polling interval in seconds |
+| `<BRIDGE>_*` | — | Bridge-specific config (API keys, endpoints, etc.) |
 
-To support emoji reactions, write a reaction event to the inbox:
+### Real-world examples
+
+- `wrappers/talk-wrapper.py` — cleanest SDK example: pure HTTP polling (no watch stream), platform logic is only `_api()` + field mapping + `is_own`; everything else is SDK.
+- `wrappers/imsg-wrapper.py` — production wrapper: SSH transport to a remote macOS host, `imsg watch --json` stream, attachment handling, systemd service.
+
+## 2. Reactions
+
+To support emoji reactions, write a reaction event to the inbox (via `write_inbox_private`):
 
 ```python
-def write_reaction(message_id, user_id, reaction, chat_id):
-    inbox_dir = BRIDGE_DIR / "inbox" / BRIDGE
-    msg = {
-        "id": f"reac_{uuid.uuid4().hex[:8]}",
-        "type": "reaction",
-        "event": "reaction:added",       # or "reaction:removed"
-        "reaction": reaction,             # e.g. "👍"
-        "sender": user_id,
-        "message_id": message_id,         # ID of the message being reacted to
-        "chat": {"id": chat_id},
-    }
-    path = inbox_dir / f"{msg['id']}.json"
-    path.write_text(json.dumps(msg, ensure_ascii=False, indent=2), "utf-8")
+write_inbox_private(BRIDGE, {
+    "id": f"reac_{uuid.uuid4().hex[:8]}",
+    "type": "reaction",
+    "event": "reaction:added",       # or "reaction:removed"
+    "reaction": "👍",
+    "sender": user_id,
+    "message_id": message_id,        # ID of the message being reacted to
+    "chat": {"id": chat_id},
+})
 ```
 
-## Unified Threads (T-058)
+## 3. Unified Threads (T-058)
 
 A **Unified Thread** lets members on different bridges share one agent session. The adapter maps every member onto the same virtual thread (`chat_id="unified"`, `thread_id=<name>`), and a reply to `unified~<name>` is multicast to each member's own `outbox/<bridge>/`.
 
@@ -444,13 +182,11 @@ A **Unified Thread** lets members on different bridges share one agent session. 
 A `/unified` command is just an inbox JSON message whose `text` starts with `/unified`. The adapter intercepts it (it never reaches the agent) and writes the reply back to the sender's `outbox/<bridge>/`:
 
 ```python
-def write_unified_command(sender, chat_id, command_text):
-    write_inbox(
-        sender=sender,
-        text=command_text,            # e.g. "/unified create projekt"
-        chat_id=chat_id,
-        chat_type="direct",
-    )
+write_inbox_private(BRIDGE, {
+    "id": str(uuid.uuid4()), "type": "message", "sender": sender,
+    "text": command_text,            # e.g. "/unified create projekt"
+    "chat": {"id": chat_id, "type": "direct", "name": sender},
+})
 ```
 
 Available commands: `create <name>`, `status`, `join <name>`, `leave <name>`, `members <name>`, `mode <name> <mode>`, `switch <name>`, `send <name> <message>`, `protokoll open <name> [sitzung]`, `protokoll close <name>`, `help`.
@@ -465,8 +201,7 @@ When the agent replies to `unified~projekt`, the adapter writes one outbox JSON 
   "id": "out_abc123",
   "bridge": "imsg",
   "target": "imsg~u1",
-  "text": "Hallo alle",
-  ...
+  "text": "Hallo alle"
 }
 ```
 
@@ -476,8 +211,7 @@ When the agent replies to `unified~projekt`, the adapter writes one outbox JSON 
   "id": "out_def456",
   "bridge": "talk",
   "target": "talk~t1",
-  "text": "Hallo alle",
-  ...
+  "text": "Hallo alle"
 }
 ```
 
@@ -503,14 +237,16 @@ The thread creator (`created_by`) is the thread's **leader**. The routing-contex
 
 ```python
 # Leader opens a session (mode switches to protokoll, messages start being collected)
-write_inbox(sender=leader, text="/unified protokoll open projekt sitzung-2026-08-10",
-            chat_id=leader_chat, chat_type="direct")
+write_inbox_private(BRIDGE, {"id": str(uuid.uuid4()), "type": "message", "sender": leader,
+                             "text": "/unified protokoll open projekt sitzung-2026-08-10",
+                             "chat": {"id": leader_chat, "type": "direct"}})
 
 # ... members keep chatting normally; the adapter collects, the agent stays silent ...
 
 # Leader closes the session (artifact written, mode reverts to participant)
-write_inbox(sender=leader, text="/unified protokoll close projekt",
-            chat_id=leader_chat, chat_type="direct")
+write_inbox_private(BRIDGE, {"id": str(uuid.uuid4()), "type": "message", "sender": leader,
+                             "text": "/unified protokoll close projekt",
+                             "chat": {"id": leader_chat, "type": "direct"}})
 ```
 
 The artifact lands at `<bridge_dir>/protokoll/projekt/sitzung-2026-08-10.md`. Only the leader may `open`/`close`; non-leader attempts get a rejection reply in their `outbox/`.
@@ -553,20 +289,99 @@ When the same person joins a unified thread from a second bridge, the adapter me
 
 The identity map is **opt-in**: without an entry, a sender's canonical `person` equals its raw `user_id`, so two unrelated people with the same id on different bridges would be merged. Add explicit entries to declare which aliases belong together.
 
-## Configuration via Environment Variables
+## Appendix: Raw File Contract
 
-All configuration should be done through environment variables so the wrapper works without hardcoded values:
+For debugging, SDK-free wrappers, and anyone who wants to know what the SDK writes on their behalf.
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `BRIDGE_DIR` | `~/.hermes/bridge` | Path to the bridge directory |
-| `BRIDGE_POLL_INTERVAL` | `1.0` | Outbox polling interval in seconds |
-| `<BRIDGE>_*` | — | Bridge-specific config (API keys, endpoints, etc.) |
+### Self-Registration (Registry)
 
-## Testing Your Wrapper
+A bridge registers itself by dropping a manifest into `registry/`. The adapter polls `registry/` and reconciles at runtime:
 
-1. Register the bridge by writing its manifest (the adapter creates the
-   directory structure automatically):
+- **Manifest present** → bridge registered; `inbox/`, `outbox/`, `status/`, `media/` directories are created automatically.
+- **Manifest removed** (`rm registry/<bridge>.yaml`) → bridge deregistered; `status/`/`media/` are cleaned up.
+
+```yaml
+# registry/imsg.yaml
+name: imsg
+service: imessage
+host: mac-mini-01
+target_format: [email, phone, chat_id]   # which target shapes this bridge accepts
+capabilities: [text, attachments, reactions]
+```
+
+### Outbox JSON format (adapter → wrapper)
+
+```json
+{
+  "id": "out_abc123",
+  "target": "user_or_chat_id",
+  "text": "Hello from Hermes!",
+  "attachments": [
+    { "type": "image", "path": "media/mybridge/outgoing/photo.jpg", "caption": "Optional caption" }
+  ],
+  "typing": false,
+  "reply_to": "msg_001",
+  "thread_id": "thread_001",
+  "metadata": {}
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `id` | string | Unique message ID |
+| `target` | string | Chat ID or recipient; may carry a `mybridge~` prefix (use `strip_bridge_prefix`) |
+| `text` | string | Message text (may be empty if only attachment) |
+| `attachments` | array | List of attachment objects (see below) |
+| `typing` | bool | If true, show typing indicator (no text/attachments) — consume without sending |
+| `reply_to` | string? | ID of message being replied to (bridge-local) |
+| `thread_id` | string? | Thread ID for threaded conversations |
+| `metadata` | object | Platform-specific extras |
+
+### Inbox JSON format (wrapper → adapter)
+
+```json
+{
+  "id": "msg_abc123",
+  "type": "message",
+  "sender": "user_42",
+  "sender_name": "Alice",
+  "text": "Hello Hermes!",
+  "chat": { "id": "chat_99", "type": "direct", "name": "Alice" },
+  "attachments": [
+    { "type": "image", "path": "media/mybridge/incoming/photo.jpg", "mime": "image/jpeg" }
+  ],
+  "reply_to": { "id": "msg_001", "text": "Previous message" },
+  "thread_id": "thread_001",
+  "thread_root": "msg_001"
+}
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `id` | string | ✅ | Unique message ID |
+| `type` | string | ✅ | `"message"` or `"reaction"` |
+| `sender` | string | ✅ | User ID (used for routing) |
+| `sender_name` | string | | Display name |
+| `text` | string | | Message text |
+| `chat.id` | string | ✅ | **Raw chat identity** (no bridge prefix), e.g. `"chat_99"` |
+| `chat.type` | string | | `"direct"` (default) or `"group"` |
+| `chat.name` | string | | Human-readable chat name |
+| `attachments` | array | | List of attachment objects |
+| `reply_to` | object | | `{ "id": "...", "text": "..." }` |
+| `thread_id` | string | | Thread identifier |
+| `thread_root` | string | | Root message ID of the thread |
+
+**⚠️ Important: The `chat.id` must be the RAW chat identity** (e.g. `"chat_99"`), **without** a bridge prefix. The adapter builds the full routable reply address (`<bridge>~<target>`) itself. If you include a prefix, the adapter would double-prefix it and replies would fail to route. The wrapper stays agnostic of the addressing convention.
+
+### Attachments
+
+**Incoming** (platform → Hermes): copy the file to `media/<bridge>/incoming/` and reference it with a path relative to the bridge dir in the inbox JSON (`{"type": "image", "path": "media/mybridge/incoming/photo.jpg", "mime": "image/jpeg"}`).
+
+**Outgoing** (Hermes → platform): the adapter copies files to `media/<bridge>/outgoing/`. Your wrapper reads the relative `path` from the outbox JSON, resolves it against the bridge dir, and sends the file via the platform API.
+
+### Testing Your Wrapper
+
+1. Register the bridge by writing its manifest (the adapter creates the directory structure automatically — the SDK's `BridgeRunner` does this for you):
    ```bash
    cat > <bridge_dir>/registry/mybridge.yaml <<'EOF'
    name: mybridge
@@ -584,7 +399,7 @@ All configuration should be done through environment variables so the wrapper wo
 3. Simulate an incoming message:
    ```bash
    echo '{"id":"test_1","type":"message","sender":"test_user","text":"Hello!","chat":{"id":"test_chat","type":"direct"}}' \
-     > <bridge_dir>/inbox/mybiridge/test_1.json
+     > <bridge_dir>/inbox/mybridge/test_1.json
    ```
 
 4. Check that the adapter picks it up (look for "bridge-adapter" in gateway logs).
@@ -592,17 +407,7 @@ All configuration should be done through environment variables so the wrapper wo
 5. Simulate an outgoing message:
    ```bash
    echo '{"id":"out_test","target":"test_chat","text":"Reply from Hermes"}' \
-     > <bridge_dir>/outbox/mybiridge/out_test.json
+     > <bridge_dir>/outbox/mybridge/out_test.json
    ```
 
 6. Check that your wrapper picks it up and sends it.
-
-## Real-World Example
-
-See `wrappers/imsg-wrapper.py` in this repository for a complete, production-ready wrapper that:
-
-- Polls outbox via SSH to a remote macOS host
-- Streams incoming messages via `imsg watch --json`
-- Handles file attachments (images, documents)
-- Reports connection status
-- Runs as a systemd service
