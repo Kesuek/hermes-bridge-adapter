@@ -137,6 +137,7 @@ capabilities: [text]
 ## Features
 
 - **Platform-agnostic** — any service that reads/writes JSON can be a bridge
+- **hermes_bridge_sdk (T-090)** — wrappers implement only platform hooks (`send`, `build_inbox_msg`, `is_own`, inbound loop); the SDK package owns the file contract (manifest, status heartbeat, last_seen dedup, atomic inbox write, outbox drain). **→ [`WRAPPER_GUIDE.md`](WRAPPER_GUIDE.md), section "Writing a Wrapper with the SDK"**
 - **Attachment support** — images, files, documents via shared media directory
 - **Reactions** — 👍 reactions on messages
 - **Typing indicators** — show when Hermes is typing
@@ -173,6 +174,15 @@ capabilities: [text]
    ```
 
 4. Restart the Gateway.
+
+## Plugin Catalog
+
+The bridge-adapter is available in the Hermes Plugin Catalog:
+
+```bash
+hermes plugins install bridge-adapter
+hermes plugins enable bridge-adapter
+```
 
 ## Adding a New Bridge
 
@@ -228,7 +238,25 @@ Each bridge is fully isolated — its own inbox, outbox, status, and media direc
 
 ## Writing a Bridge Wrapper
 
-A bridge wrapper is any script that:
+**Start with the SDK.** The `wrappers/hermes_bridge_sdk/` package provides `BridgeRunner` and helpers — a wrapper implements only platform-specific logic and hands it over:
+
+```python
+from hermes_bridge_sdk import BridgeRunner
+
+BridgeRunner(
+    bridge="mybridge",
+    service="my-service",
+    host="my-host",
+    target_format=["chat_id"],
+    capabilities=["text"],
+    send=lambda target, text, attachments: platform_send(target, text),
+    extra_threads=[lambda: threading.Thread(target=inbound_loop, daemon=True)],
+).main()   # registers manifest, starts outbox+heartbeat threads, blocks, cleans up
+```
+
+The runner registers the manifest on startup (the adapter creates the directory tree), writes the status heartbeat, drains the outbox, and unregisters cleanly on shutdown. **→ Full SDK guide with a complete minimal wrapper: [`WRAPPER_GUIDE.md`](WRAPPER_GUIDE.md)**
+
+Without the SDK, a wrapper is any script that:
 
 1. **Reads** JSON files from `outbox/<bridge>/` (messages from Hermes)
 2. **Sends** them via the platform's API (your messaging service, chatbot, etc.)
