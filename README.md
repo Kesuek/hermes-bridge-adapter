@@ -143,7 +143,8 @@ capabilities: [text]
 - **Typing indicators** — show when Hermes is typing
 - **Reply chains** — reply_to preserves conversation context
 - **Per-bridge config** — mention patterns, user allowlists, poll intervals
-- **Auto-cleanup** — old media files and stale outbox entries are purged
+- **Auto-cleanup** — old media files (>24h) and stale outbox entries (>1h, the at-least-once retry window) are purged
+- **Delivery semantics** — file delivery is at-least-once: writes are atomic (temp + `os.replace`, T-094/T-096), a failed outbox send retries on the next sweep (T-095), and the inbox poller retries unreadable files instead of skipping them (T-097). A crash between dispatch and unlink can duplicate an inbound message (no ID-based dedup) — at-least-once by design.
 - **Health monitoring** — status files polled every 60s, logged on disconnect
 - **Registry self-registration (T-050)** — bridges register via `registry/` manifests, picked up at runtime without a restart
 - **Agent awareness (T-051)** — a system-prompt platform hint teaches the agent to read `registry/` and address messages as `<bridge>~<target>`; every inbound message carries a compact routing line (`[Message from <sender>, bridge <bridge>, reply to <bridge>~<target>]`)

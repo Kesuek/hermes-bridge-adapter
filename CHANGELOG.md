@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **T-094:** `write_private` (SDK) is now atomic — temp file with a uuid
+  suffix (T-079 pattern) + `os.replace`. A concurrent reader (the adapter's
+  inbox poller) sees either the old or the new file, never a torn write.
+  Applies to state, status, manifest and inbox writes; 0600 perms (T-071)
+  are unchanged.
+- **T-095:** The SDK outbox drain is now at-least-once as documented: a
+  failed `send` no longer deletes the file (previously at-most-once) — it
+  is retried on the next sweep, with the adapter's 1h outbox cleanup
+  (`OUTBOX_CLEANUP_MAX_AGE`) bounding the retry window. Files that fail
+  to parse are also kept instead of deleted: with atomic writes a parse
+  failure is almost certainly a torn read of a concurrent write.
+- **T-096:** The adapter writes outbox files atomically
+  (`_atomic_write_json`), so a wrapper reading the outbox can no longer
+  observe a torn write.
+- **T-097:** The inbox poller no longer marks a file as seen before
+  parsing it: a parse failure (torn read, partially written file) is
+  logged and retried on the next poll instead of skipping the file
+  forever. A permanently corrupt file is retried on every poll (logged
+  at warning level) — deliberately, since with atomic writes this is
+  practically unreachable.
+
 ### Security
 - **T-086:** `/unified identity confirm` counts attempt strikes only when the
   sent code matches **none** of the open candidate claims on the bridge

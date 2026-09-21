@@ -1829,13 +1829,17 @@ class BridgeAdapter(BasePlatformAdapter):
                 key = str(filepath.absolute())
                 if key in self._seen_files:
                     continue
-                self._seen_files.add(key)
 
                 try:
                     data = json.loads(filepath.read_text("utf-8"))
                 except (json.JSONDecodeError, OSError) as e:
-                    logger.warning("Invalid JSON in %s: %s", filepath, e)
+                    # T-097: do NOT mark seen — the file may be a torn read
+                    # of a concurrent atomic write (T-094/T-096) or recover
+                    # later. Retried on the next poll.
+                    logger.warning("Invalid JSON in %s (will retry): %s",
+                                   filepath, e)
                     continue
+                self._seen_files.add(key)
 
                 await self._process_incoming(bridge, data, filepath)
 
@@ -2800,7 +2804,9 @@ class BridgeAdapter(BasePlatformAdapter):
 
         filepath = outbox_dir / f"{msg_id}.json"
         try:
-            filepath.write_text(json.dumps(outbox, ensure_ascii=False, indent=2), "utf-8")
+            # T-096: atomic write — a wrapper reading the outbox sees
+            # either the old or the new file, never a torn write.
+            self._atomic_write_json(filepath, outbox)
             logger.debug("Wrote outbox: %s", filepath)
             return SendResult(success=True, message_id=outbox["id"])
         except OSError as e:

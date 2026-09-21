@@ -24,11 +24,16 @@ def drain_outbox_once(
 ) -> None:
     """Poll outbox/<bridge>/ and send pending messages via ``send``.
 
-    Contract preserved from the original wrappers: invalid JSON is dropped,
-    ``typing`` markers are consumed without sending, files are unlinked
-    after send (at-least-once; the adapter tolerates re-delivery).
-    ``once=True`` processes a single sweep and returns (used by tests and
-    one-shot commands like test-wrapper drain).
+    Contract preserved from the original wrappers: ``typing`` markers are
+    consumed without sending, separator-strip, files are unlinked only
+    after a successful send (T-095, at-least-once — a failed send leaves
+    the file in place and it is retried on the next sweep; the adapter's
+    OUTBOX_CLEANUP_MAX_AGE / 1h cleanup bounds the retry window). Files
+    that fail to parse are KEPT (T-095): with atomic writes (T-094) a
+    parse failure is almost certainly a torn read of a concurrent write,
+    which resolves on the next poll. Deleting it would destroy the
+    message. ``once=True`` processes a single sweep and returns (used by
+    tests and one-shot commands like test-wrapper drain).
     """
     outbox_dir = outbox_dir or bridge_dir() / "outbox" / bridge
     while True:
@@ -37,8 +42,10 @@ def drain_outbox_once(
                 try:
                     data = json.loads(f.read_text("utf-8"))
                 except (json.JSONDecodeError, OSError) as e:
+                    # T-095: keep the file — with atomic writes (T-094) a
+                    # parse failure is almost certainly a torn read of a
+                    # concurrent write; deleting it destroys the message.
                     logger.warning("Invalid outbox JSON %s: %s", f, e)
-                    f.unlink(missing_ok=True)
                     continue
 
                 if data.get("typing"):
@@ -52,9 +59,11 @@ def drain_outbox_once(
                         send(target, text, data.get("attachments"))
                     else:
                         logger.warning("Outbox %s: empty target+text, skipped", f.name)
+                    f.unlink(missing_ok=True)  # T-095: only on success
                 except Exception as e:
-                    logger.error("Send failed for %s: %s", f.name, e)
-                f.unlink(missing_ok=True)
+                    # T-095: at-least-once — leave the file for the next
+                    # sweep; the 1h cleanup bounds the retry window.
+                    logger.error("Send failed for %s (kept for retry): %s", f.name, e)
         except Exception as e:
             logger.error("Outbox poll error: %s", e)
         if once:

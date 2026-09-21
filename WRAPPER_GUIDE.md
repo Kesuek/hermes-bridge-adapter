@@ -142,7 +142,7 @@ from hermes_bridge_sdk import (
 | `load_last_seen(file)` / `save_last_seen(state, file)` | last_seen dedup state — **always reload before each poll** (T-091 RMW race: a stale dict rolls back other loops' bumps → duplicate deliveries) |
 | `write_inbox_private(bridge, data)` / `write_inbox` | Atomic inbox write with `0600` perms (T-071); `write_inbox` is the backwards-compatible alias |
 | `strip_bridge_prefix(target, bridge)` | Strips `mybridge~` (T-056) or legacy `mybridge:` so the wrapper stays agnostic of addressing |
-| `drain_outbox_once(bridge, send, interval, once=)` / `outbox_loop` | Outbox polling: mtime-sorted glob, invalid-JSON drop, typing-skip, send via your `send`, unlink after (at-least-once) |
+| `drain_outbox_once(bridge, send, interval, once=)` / `outbox_loop` | Outbox polling: mtime-sorted glob, typing-skip, send via your `send`. **At-least-once (T-095):** the file is unlinked only after a successful send — a failed send keeps the file and it is retried on the next sweep (the adapter's 1h outbox cleanup bounds the retry window). Files that fail to parse are kept, not dropped (torn-read protection). |
 
 Configuration via environment variables:
 
