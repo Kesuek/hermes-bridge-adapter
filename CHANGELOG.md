@@ -28,6 +28,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   forever. A permanently corrupt file is retried on every poll (logged
   at warning level) — deliberately, since with atomic writes this is
   practically unreachable.
+- **T-098:** Bound the T-097 retry: after `PARSE_FAILURE_LIMIT` (3) failed
+  parses the poller quarantines the file by renaming it to `*.corrupt`
+  (content kept for forensics, no longer picked up by the `*.json` glob)
+  instead of warning every poll forever. The failure counter resets on a
+  successful parse, so a genuine torn read never accumulates toward the
+  limit.
 
 ### Security
 - **T-086:** `/unified identity confirm` counts attempt strikes only when the

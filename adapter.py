@@ -327,6 +327,7 @@ class BridgeAdapter(BasePlatformAdapter):
         self._silent_flush_task: Optional[asyncio.Task] = None
         self._running = False
         self._seen_files: set[str] = set()
+        self._parse_failures: dict[str, int] = {}  # T-098 quarantine counter
         self._reaction_handler: Optional[callable] = None
 
         # Unified threads (T-058): {name → thread dict} loaded from disk.
@@ -1549,6 +1550,7 @@ class BridgeAdapter(BasePlatformAdapter):
     ADAPTIVE_THRESHOLD_30 = 3  # messages in 30s → digest
     ADAPTIVE_THRESHOLD_60 = 5  # messages in 60s → digest
     ADAPTIVE_DIGEST_INTERVAL = 60  # seconds — flush after this
+    PARSE_FAILURE_LIMIT = 3  # failed inbox parses before quarantine (T-098)
     ADAPTIVE_COOLDOWN = 10  # seconds post-flush cooldown
 
     def _adaptive_state(self, name: str) -> dict:
@@ -1835,10 +1837,37 @@ class BridgeAdapter(BasePlatformAdapter):
                 except (json.JSONDecodeError, OSError) as e:
                     # T-097: do NOT mark seen — the file may be a torn read
                     # of a concurrent atomic write (T-094/T-096) or recover
-                    # later. Retried on the next poll.
-                    logger.warning("Invalid JSON in %s (will retry): %s",
-                                   filepath, e)
+                    # later. Retried on the next poll — up to
+                    # PARSE_FAILURE_LIMIT attempts (T-098), after which the
+                    # file is quarantined as *.corrupt (renamed, not
+                    # deleted — content stays available for forensics) so
+                    # the *.json glob no longer picks it up. A permanently
+                    # corrupt file otherwise spams a warning every poll
+                    # (1s) forever.
+                    n = self._parse_failures.get(key, 0) + 1
+                    if n >= self.PARSE_FAILURE_LIMIT:
+                        corrupt = filepath.with_suffix(
+                            filepath.suffix + ".corrupt"
+                        )
+                        try:
+                            filepath.rename(corrupt)
+                        except OSError:
+                            pass  # retried next poll
+                        self._parse_failures.pop(key, None)
+                        self._seen_files.add(key)
+                        logger.error(
+                            "Quarantined inbox file after %d failed parses"
+                            " (T-098): %s -> %s (%s)",
+                            n, filepath, corrupt, e,
+                        )
+                    else:
+                        self._parse_failures[key] = n
+                        logger.warning("Invalid JSON in %s (will retry): %s",
+                                       filepath, e)
                     continue
+                # Parse succeeded: reset the failure counter (a torn read
+                # that later succeeds must not accumulate toward quarantine).
+                self._parse_failures.pop(key, None)
                 self._seen_files.add(key)
 
                 await self._process_incoming(bridge, data, filepath)

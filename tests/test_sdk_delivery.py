@@ -216,6 +216,55 @@ def test_poller_retries_invalid_json(tmp_path, _register_platform):
     assert not f.exists()  # processed -> unlinked
 
 
+def test_poller_quarantines_permanently_corrupt_file(tmp_path, _register_platform):
+    """T-098: after PARSE_FAILURE_LIMIT failed attempts the file is
+    quarantined (renamed *.corrupt) instead of retrying forever."""
+    a = _make_adapter(tmp_path)
+    _register_bridge(a)
+    inbox = a._bridge_dir / "inbox" / "imsg"
+    inbox.mkdir(parents=True, exist_ok=True)
+    f = inbox / "bad.json"
+    f.write_text('{"sender": "x", broken')  # permanently corrupt
+
+    for _ in range(a.PARSE_FAILURE_LIMIT - 1):
+        asyncio.run(a._poll_all())
+        assert f.exists()  # still in place during retries
+
+    asyncio.run(a._poll_all())  # Nth failure -> quarantine
+    assert not f.exists()  # no longer picked up by the *.json glob
+    corrupt = list(inbox.glob("*.corrupt"))
+    assert len(corrupt) == 1
+    assert corrupt[0].read_text() == '{"sender": "x", broken'
+
+
+def test_poller_resets_failure_counter_on_success(tmp_path, _register_platform):
+    """T-098: a torn read that later succeeds must not accumulate toward
+    the quarantine limit."""
+    a = _make_adapter(tmp_path)
+    _register_bridge(a)
+    inbox = a._bridge_dir / "inbox" / "imsg"
+    inbox.mkdir(parents=True, exist_ok=True)
+    f = inbox / "m1.json"
+
+    # (limit - 1) torn reads
+    f.write_text('{"sender": "x", torn')
+    for _ in range(a.PARSE_FAILURE_LIMIT - 1):
+        asyncio.run(a._poll_all())
+    assert f.exists()
+
+    # writer finishes -> parses -> counter reset
+    f.write_text('{"sender": "x", "text": "hello", "chat": {"id": "c1"}}')
+    a.handle_message = AsyncMock()
+    asyncio.run(a._poll_all())
+    assert a.handle_message.await_count == 1
+    assert not f.exists()
+
+    # a fresh torn read starts from zero, not from the stale counter
+    f.write_text('{"sender": "x", torn')
+    asyncio.run(a._poll_all())
+    assert f.exists() and not list(inbox.glob("*.corrupt"))
+
+
 def test_poller_symlink_still_marked_seen(tmp_path, _register_platform):
     """T-072 behaviour preserved: symlinks are rejected AND marked seen."""
     a = _make_adapter(tmp_path)
