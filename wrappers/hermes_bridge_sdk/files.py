@@ -21,15 +21,26 @@ def bridge_dir() -> Path:
 
 
 def write_private(path: Path, content: str) -> None:
-    """Write a file with 0600 perms (T-071).
+    """Write a file atomically with 0600 perms (T-071 + T-094).
 
-    State/status/manifest files may carry tokens or routing secrets and
-    must not be world-readable on a shared host. ``write_text`` alone
-    leaves the file at the umask default (often 0644); ``chmod 0o600``
-    enforces it regardless of umask. Inbox messages carry no secrets but
-    are kept 0600 for consistency.
+    Atomic via temp + ``os.replace`` (a concurrent reader — e.g. the
+    adapter's inbox poller — sees either the old or the new file, never
+    a torn write; T-094). The temp name carries a uuid component (the
+    T-079 pattern from ``adapter._atomic_write_json``) so concurrent
+    writers never collide and the ``*.json`` glob never matches the
+    temp. 0600 chmod (T-071) enforces privacy regardless of umask:
+    state/status/manifest files may carry tokens or routing secrets.
     """
-    path.write_text(content, "utf-8")
+    tmp = path.with_name(f"{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        tmp.write_text(content, "utf-8")
+        os.replace(tmp, path)
+    except OSError:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
     try:
         os.chmod(path, 0o600)
     except OSError:
