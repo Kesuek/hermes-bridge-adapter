@@ -12,7 +12,14 @@ Works in two load contexts:
 
 try:
     from .adapter import register  # Hermes plugin package load
-except ImportError:  # pragma: no cover - flat-module load during pytest
+except ImportError as exc:  # pragma: no cover - flat-module load during pytest
+    # Fall back ONLY when the relative import itself is unresolvable
+    # ("attempted relative import with no known parent package").
+    # Errors from adapter's own dependencies (e.g. a missing module inside
+    # ``.adapter``) must NOT trigger the fallback — they would surface as a
+    # misleading "No module named 'adapter'" and mask the real cause.
+    if "no known parent package" not in str(exc):
+        raise
     import adapter as _adapter
 
     register = _adapter.register
