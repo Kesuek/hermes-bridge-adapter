@@ -32,7 +32,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-import hermes_yaml
+try:
+    import hermes_yaml as yaml_mod
+except ImportError:  # Hermes releases before hermes_yaml shipped
+    import yaml as yaml_mod
 
 from gateway.config import Platform, PlatformConfig
 from gateway.platforms.base import (
@@ -188,7 +191,7 @@ def load_manifest(data: dict) -> BridgeManifest:
 def read_manifest(path: Path) -> BridgeManifest:
     """Read and parse a manifest YAML file from ``path``."""
     with open(path, "r", encoding="utf-8") as f:
-        return load_manifest(hermes_yaml.safe_load(f) or {})
+        return load_manifest(yaml_mod.safe_load(f) or {})
 
 
 def scan_registry(registry_dir: Path) -> dict:
