@@ -229,3 +229,46 @@ def test_history_loop_rereads_state_each_poll(monkeypatch, tmp_path):
     assert seen_states and seen_states[0].get("4") == 3481, (
         f"history_loop must re-read the state file before polling, saw: {seen_states}"
     )
+
+
+# ── T-100: talk-wrapper saves last_seen after every inbox write ──────
+
+
+def test_talk_poll_once_persists_frontier_per_write(monkeypatch, tmp_path):
+    """Crash between write_inbox_private and save_last_seen must not
+    re-poll the same messages with fresh SDK UUIDs (defeating the
+    adapter's dedup). The wrapper must persist the frontier immediately
+    after each successful write."""
+    talk = _load_wrapper_module_by_path(
+        ROOT / "wrappers" / "talk-wrapper.py", "talk_wrapper_under_test")
+    talk.STATE_FILE = tmp_path / "state" / "talk" / "last_seen.json"
+
+    written = []
+    monkeypatch.setattr(talk, "write_inbox_private", lambda b, d: written.append(d))
+    monkeypatch.setattr(talk, "get_rooms", lambda: [{"token": "t1", "type": 3, "name": "R"}])
+    monkeypatch.setattr(talk, "get_chat", lambda token, limit=20: [
+        {"id": 10, "actorId": "someone", "message": "a"},
+        {"id": 11, "actorId": "someone", "message": "b"},
+    ])
+    monkeypatch.setattr(talk, "is_own", lambda raw: False)
+
+    saved = {}
+    real_save = talk.save_last_seen
+    def fake_save(state, path):
+        saved["state"] = dict(state)
+        real_save(state, path)
+    monkeypatch.setattr(talk, "save_last_seen", fake_save)
+
+    talk.poll_once({})
+
+    # Frontier persisted after the LAST write matches the last delivered id.
+    assert len(written) == 2
+    assert saved["state"]["t1"] == 11
+
+
+def _load_wrapper_module_by_path(path, name):
+    spec = importlib.util.spec_from_file_location(name, str(path))
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[name] = mod
+    spec.loader.exec_module(mod)
+    return mod

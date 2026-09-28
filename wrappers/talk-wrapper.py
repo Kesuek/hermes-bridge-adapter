@@ -213,6 +213,14 @@ def poll_once(last_seen: dict) -> dict:
                 continue
             try:
                 write_inbox_private(BRIDGE, build_inbox_msg(raw, room_name, token, chat_type))
+                # T-100: persist the frontier immediately after each write.
+                # A crash between write and save would otherwise re-poll the
+                # same messages and — with the SDK's per-write UUID stamp —
+                # generate fresh ids, defeating the adapter's dedup. The
+                # saved state is always >= the newest inbox file on disk.
+                if mid:
+                    last_seen[token] = mid
+                    save_last_seen(last_seen, STATE_FILE)
             except Exception as e:
                 logger.error("Failed writing inbox for msg %s: %s", mid, e)
         if max_id > last_id:
