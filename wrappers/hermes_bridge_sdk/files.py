@@ -112,10 +112,19 @@ def save_last_seen(state: dict, state_file: Path) -> None:
 
 
 def write_inbox_private(bridge: str, data: dict, inbox_dir: Path | None = None) -> Path:
-    """Atomically write an inbox message as 0600 JSON. Returns the path."""
+    """Atomically write an inbox message as 0600 JSON. Returns the path.
+
+    T-100: stamps ``data["id"]`` with the same id used for the filename
+    when the payload carries none — the adapter's inbound dedup
+    (``dedup_map.json``) keys on ``id``/``message_id``, so a wrapper
+    without a platform-native id still gets a stable per-message id
+    instead of delivering id-less (at-least-once) forever. Wrapper-provided
+    ids (e.g. the platform rowid) are preserved as-is.
+    """
     inbox_dir = inbox_dir or bridge_dir() / "inbox" / bridge
     inbox_dir.mkdir(parents=True, exist_ok=True)
-    msg_id = data.get("id", str(uuid.uuid4()))
+    msg_id = str(data.get("id") or data.get("message_id") or uuid.uuid4())
+    data["id"] = msg_id
     path = inbox_dir / f"{msg_id}.json"
     write_private(path, json.dumps(data, ensure_ascii=False, indent=2))
     logger.info("Wrote inbox: %s (from %s)", path, data.get("sender", "?"))

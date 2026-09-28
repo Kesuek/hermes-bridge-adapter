@@ -278,3 +278,47 @@ def test_poller_symlink_still_marked_seen(tmp_path, _register_platform):
 
     asyncio.run(a._poll_all())
     assert str(f.absolute()) in a._seen_files
+
+# ── T-100: SDK stamps a stable id into every inbox payload ─────────────
+
+def test_write_inbox_stamps_id_when_missing(tmp_path):
+    """T-100: an id-less payload gets the filename id stamped in — the
+    adapter's dedup can then drop a crash-window duplicate."""
+    inbox = tmp_path / "inbox" / "talk"
+    p = sdk_files.write_inbox_private("talk", {"sender": "x", "text": "hi"}, inbox_dir=inbox)
+    data = json.loads(p.read_text())
+    assert data["id"], "id must be stamped"
+    assert p.name == f"{data['id']}.json"
+
+
+def test_write_inbox_preserves_wrapper_id(tmp_path):
+    """A wrapper-provided id (platform rowid) is kept, not replaced."""
+    inbox = tmp_path / "inbox" / "imsg"
+    p = sdk_files.write_inbox_private(
+        "imsg", {"id": 12345, "sender": "x", "text": "hi"}, inbox_dir=inbox)
+    data = json.loads(p.read_text())
+    assert data["id"] == "12345"
+    assert p.name == "12345.json"
+
+
+def test_write_inbox_id_less_payload_end_to_end_dedup(tmp_path):
+    """End-to-end: SDK-stamped id survives into the adapter's dedup map
+    (a re-poll of the same file is suppressed)."""
+    ROOT = Path(__file__).resolve().parent.parent
+    sys.path.insert(0, str(ROOT))
+    from test_unified import _make_adapter
+
+    inbox = tmp_path / "inbox" / "talk"
+    msg = {"sender": "ronny", "text": "Hallo", "chat": {"id": "r1", "type": "direct"}}
+    p = sdk_files.write_inbox_private("talk", dict(msg), inbox_dir=inbox)
+    stamped = json.loads(p.read_text())["id"]
+
+    adapter_root = tmp_path / "adapter"
+    (adapter_root / "bridge").mkdir(parents=True)
+    from gateway.config import PlatformConfig
+    from adapter import BridgeAdapter
+    cfg = PlatformConfig(enabled=True, extra={"bridge_dir": str(adapter_root / "bridge")})
+    a = BridgeAdapter(cfg)
+    a._record_dispatched_id("talk", stamped)
+    # Simulate the crash-window retry: the same file is re-poll'ed.
+    assert a._is_duplicate("talk", json.loads(p.read_text()))
