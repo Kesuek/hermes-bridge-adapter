@@ -1935,3 +1935,82 @@ def test_identity_claim_does_not_leak_code_to_claimer(tmp_path):
     assert re.search(r"\b\d{6}\b", sent_text), (
         f"target outbox text must contain the 6-digit code: {sent_text!r}"
     )
+
+# ── T-100: inbound dedup ─────────────────────────────────────────────
+
+
+def test_dedup_record_roundtrip(tmp_path):
+    a = _make_adapter(tmp_path)
+    a._record_dispatched_id("imsg", "msg_abc")
+    # Key is namespaced per bridge.
+    assert "imsg~msg_abc" in a._dedup_map
+    # Reload from disk (simulating a restart).
+    a._load_dedup_map()
+    assert a._is_duplicate("imsg", {"id": "msg_abc"})
+
+
+def test_dedup_drops_duplicate_inbound(tmp_path):
+    a = _make_adapter(tmp_path)
+    a._extra["allow_all"] = "true"
+    a._load_dedup_map()
+    a.handle_message = AsyncMock()
+    inbox = tmp_path / "bridge" / "inbox" / "imsg"
+    inbox.mkdir(parents=True)
+    f = inbox / "m.json"
+    msg = {
+        "sender": "ronny", "text": "Hallo", "id": "msg_dup",
+        "chat": {"id": "u1", "type": "direct"},
+    }
+    f.write_text(json.dumps(msg), encoding="utf-8")
+
+    async def run():
+        await a._process_incoming("imsg", dict(msg), f)
+        # The file is unlinked after dispatch; recreate it to simulate the
+        # crash-retry case: same id re-poll after dispatch+unlink gap.
+        f.write_text(json.dumps(msg), encoding="utf-8")
+        await a._process_incoming("imsg", dict(msg), f)
+
+    asyncio.run(run())
+    # handle_message must have been called exactly ONCE.
+    assert a.handle_message.await_count == 1
+
+
+def test_dedup_id_less_message_stays_at_least_once(tmp_path):
+    a = _make_adapter(tmp_path)
+    a._extra["allow_all"] = "true"
+    a._load_dedup_map()
+    a.handle_message = AsyncMock()
+
+    async def run():
+        for _ in range(2):
+            await a._process_incoming("imsg", {
+                "sender": "ronny", "text": "Hallo",  # no id
+                "chat": {"id": "u1", "type": "direct"},
+            }, tmp_path / "x.json")
+
+    asyncio.run(run())
+    assert a.handle_message.await_count == 2
+
+
+def test_dedup_ttl_and_cap(tmp_path):
+    a = _make_adapter(tmp_path)
+    # A stale entry is pruned on record.
+    a._dedup_map["imsg~old"] = {"ts": time.time() - a.DEDUP_TTL - 10}
+    a._record_dispatched_id("imsg", "new")
+    assert "imsg~old" not in a._dedup_map
+    # Cap: fill beyond DEDUP_CAP, oldest dropped.
+    old_ts = time.time() - 100
+    for i in range(a.DEDUP_CAP):
+        a._dedup_map[f"imsg~fill{i}"] = {"ts": old_ts}
+    a._dedup_map["imsg~oldest"] = {"ts": old_ts - 1}
+    a._record_dispatched_id("imsg", "new")
+    assert len(a._dedup_map) <= a.DEDUP_CAP
+    assert "imsg~oldest" not in a._dedup_map
+
+
+def test_dedup_bridge_namespacing(tmp_path):
+    a = _make_adapter(tmp_path)
+    a._record_dispatched_id("imsg", "m1")
+    # Same local id on a different bridge is NOT a duplicate.
+    assert not a._is_duplicate("talk", {"id": "m1"})
+    assert a._is_duplicate("imsg", {"id": "m1"})

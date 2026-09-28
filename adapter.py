@@ -341,6 +341,9 @@ class BridgeAdapter(BasePlatformAdapter):
         # bridge-agnostic, the local id is bridge-specific).
         self._reply_map: dict[str, dict] = {}
 
+        # Inbound dedup (T-100): {bridge~local_id → {ts}} of dispatched ids.
+        self._dedup_map: dict[str, dict] = {}
+
         # Identity map (T-062): canonical person → [alias, ...]. Maps a
         # bridge-local user_id to a canonical identity so the same person
         # appearing on two bridges is treated as one member.
@@ -408,6 +411,11 @@ class BridgeAdapter(BasePlatformAdapter):
         # Load the reply map (T-060) so cross-bridge reply chains resolve
         # across restarts.
         self._load_reply_map()
+
+        # Load the inbound dedup map (T-100) so a crash between dispatch
+        # and unlink can't re-dispatch a wrapper-id-carrying message
+        # across a restart.
+        self._load_dedup_map()
 
         # Load the identity map (T-062) so member dedup works across
         # restarts.
@@ -605,6 +613,77 @@ class BridgeAdapter(BasePlatformAdapter):
     # if the map still exceeds CAP after pruning (second safety net).
     REPLY_MAP_TTL = 7 * 86400  # 7 days
     REPLY_MAP_CAP = 5000
+
+    # T-100: inbound dedup. The delivery contract is at-least-once: a crash
+    # between ``handle_message`` and ``_unlink_inbox_file`` leaves the file
+    # on disk and it is dispatched again on the next poll (or after a
+    # restart — ``_seen_files`` is in-memory). Wrappers that carry a stable
+    # per-message id (``id``/``message_id``) let the adapter close that gap:
+    # seen ids are recorded here and duplicates are dropped before dispatch.
+    DEDUP_TTL = 7 * 86400  # 7 days
+    DEDUP_CAP = 5000
+
+    def _dedup_map_path(self) -> Path:
+        """Path to the ``dedup_map.json`` persistence file."""
+        return self._bridge_dir / "dedup_map.json" if self._bridge_dir else Path()
+
+    def _load_dedup_map(self) -> None:
+        """Load seen inbound message ids from ``dedup_map.json`` (best-effort)."""
+        self._dedup_map: dict[str, dict] = {}
+        p = self._dedup_map_path()
+        if not p or not p.exists():
+            return
+        try:
+            data = json.loads(p.read_text("utf-8"))
+            if isinstance(data, dict):
+                self._dedup_map = data
+        except (json.JSONDecodeError, OSError) as e:
+            logger.warning("Bad dedup_map.json: %s", e)
+
+    def _record_dispatched_id(self, bridge: str, local_id: str) -> None:
+        """Record a dispatched inbound message id (T-100), with TTL prune.
+
+        Mirrors the reply-map persistence pattern: prune entries older than
+        ``DEDUP_TTL`` on save, hard cap as second safety net. The dedup key
+        is ``bridge~local_id`` — local ids are only unique per bridge.
+        """
+        if not local_id:
+            return
+        key = f"{bridge}~{local_id}"
+        now = time.time()
+        ttl = self.DEDUP_TTL
+        pruned = {
+            k: v for k, v in self._dedup_map.items()
+            if now - float(v.get("ts", 0)) < ttl
+        }
+        pruned[key] = {"ts": now}
+        cap = self.DEDUP_CAP
+        if len(pruned) > cap:
+            kept = sorted(
+                pruned.items(),
+                key=lambda kv: float(kv[1].get("ts", 0)),
+                reverse=True,
+            )[:cap]
+            pruned = dict(kept)
+        self._dedup_map = pruned
+        p = self._dedup_map_path()
+        if p:
+            self._atomic_write_json(p, self._dedup_map)
+
+    def _is_duplicate(self, bridge: str, data: dict) -> bool:
+        """True if this inbound message was already dispatched (T-100).
+
+        Only messages carrying a wrapper-provided stable id (``id`` or
+        ``message_id``) can be deduped; without one the adapter stays
+        at-least-once (dispatch, then unlink) exactly as before.
+        """
+        local_id = data.get("id") or data.get("message_id") or ""
+        if not local_id:
+            return False
+        key = f"{bridge}~{local_id}"
+        if key in self._dedup_map:
+            return True
+        return False
 
     def _reply_map_path(self) -> Path:
         """Path to the ``reply_map.json`` persistence file."""
@@ -1896,6 +1975,18 @@ class BridgeAdapter(BasePlatformAdapter):
             logger.warning("Inbox message missing 'sender', skipping %s", filepath)
             return
 
+        # T-100: drop wrapper-id duplicates before any dispatch (a crash
+        # between dispatch and unlink, or a wrapper retry, must not send
+        # the same message to the agent twice). Id-less messages stay
+        # at-least-once as documented.
+        if self._is_duplicate(bridge, data):
+            logger.info(
+                "Duplicate inbound message suppressed (T-100): %s %s",
+                bridge, data.get("id") or data.get("message_id"),
+            )
+            self._unlink_inbox_file(filepath)
+            return
+
         # /unified commands (T-058): treat as adapter command, not a normal
         # message. Parsed and dispatched here so they never reach the agent.
         # Alias: /u <sub> is shorthand for /unified <sub> (T-067).
@@ -2271,6 +2362,14 @@ class BridgeAdapter(BasePlatformAdapter):
             # is_user_allowed path which also unlinks.
             self._unlink_inbox_file(filepath)
             return
+
+        # T-100: record the wrapper-local id BEFORE dispatch. If a crash
+        # happens between here and the unlink, the id is already recorded,
+        # so the retry poll (or a post-restart re-poll) drops the file as
+        # a duplicate instead of re-dispatching it.
+        self._record_dispatched_id(
+            bridge, data.get("id") or data.get("message_id") or ""
+        )
 
         await self.handle_message(event)
 
