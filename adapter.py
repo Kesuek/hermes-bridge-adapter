@@ -19,6 +19,7 @@ Directory structure::
         └── <bridge>/outgoing/  ← outgoing attachments (adapter → wrapper)
 """
 
+import ast
 import asyncio
 import json
 import logging
@@ -61,6 +62,41 @@ DEFAULT_MENTION_PATTERNS = [
     r"(?<![\w@])@?hermes\s+agent\b[,:\-]?",
     r"(?<![\w@])@?hermes\b[,:\-]?",
 ]
+
+# Patterns already reported as invalid, so a bad config line warns once, not every poll.
+_WARNED_BAD_PATTERNS: set = set()
+
+
+def _parse_list_option(raw) -> list:
+    """Normalize a list-valued option to a list of non-empty strings.
+
+    Accepts a real list/tuple (YAML config), a JSON list string, a Python-repr list
+    string (a list that was str()-ed upstream), or a comma-separated string (env
+    vars). A comma-split is used only for plain strings, never for list syntax, so
+    regexes such as ``a{1,2}`` survive when configured as a list.
+    """
+    if raw is None:
+        return []
+    if isinstance(raw, (list, tuple)):
+        return [str(v).strip() for v in raw if str(v).strip()]
+    text = str(raw).strip()
+    if not text:
+        return []
+    if text.startswith("[") and text.endswith("]"):
+        for loader in (json.loads, ast.literal_eval):
+            try:
+                loaded = loader(text)
+            except (ValueError, SyntaxError, TypeError):
+                continue
+            if isinstance(loaded, (list, tuple)):
+                return [str(v).strip() for v in loaded if str(v).strip()]
+    try:
+        loaded = json.loads(text)
+    except ValueError:
+        loaded = None
+    if isinstance(loaded, str):
+        return [loaded] if loaded.strip() else []
+    return [part.strip() for part in text.split(",") if part.strip()]
 
 
 def _now_iso() -> str:
@@ -246,12 +282,14 @@ class BridgeConfig:
     @staticmethod
     def _get_opt(extra: dict, prefix: str, key: str, env: str, fallback: str = "") -> str:
         """Check bridge-specific extra first, then global extra, then env, then fallback."""
-        val = extra.get(f"{prefix}{key}")
-        if val is not None:
-            return str(val)
-        val = extra.get(key)
-        if val is not None:
-            return str(val)
+        for candidate in (extra.get(f"{prefix}{key}"), extra.get(key)):
+            if candidate is None:
+                continue
+            if isinstance(candidate, (list, tuple)):
+                # Keep list structure: str() would yield a Python repr that later
+                # parsing mis-splits ("['(?i)@hermes'" -> invalid regex).
+                return json.dumps([str(v) for v in candidate])
+            return str(candidate)
         return os.getenv(env, fallback).strip()
 
     def is_user_allowed(self, user_id: str) -> bool:
@@ -259,8 +297,7 @@ class BridgeConfig:
         if self.allow_all.lower() in ("true", "1", "yes"):
             return True
         if self.allowed_users:
-            allowed = [u.strip() for u in self.allowed_users.split(",")]
-            return user_id in allowed
+            return user_id in _parse_list_option(self.allowed_users)
         return False
 
 
@@ -2980,19 +3017,20 @@ class BridgeAdapter(BasePlatformAdapter):
 
     @staticmethod
     def _compile_mention_patterns(raw) -> list[re.Pattern]:
-        if raw is None:
+        if raw is None or not isinstance(raw, (str, list, tuple)):
             patterns = list(DEFAULT_MENTION_PATTERNS)
-        elif isinstance(raw, str):
-            try:
-                loaded = json.loads(raw) if raw.strip() else []
-            except Exception:
-                loaded = raw.split(",") if raw else []
-            patterns = loaded if isinstance(loaded, list) else [raw]
-        elif isinstance(raw, list):
-            patterns = raw
         else:
-            patterns = list(DEFAULT_MENTION_PATTERNS)
-        return [re.compile(p, re.IGNORECASE) for p in patterns]
+            patterns = _parse_list_option(raw)
+        compiled = []
+        for p in patterns:
+            try:
+                compiled.append(re.compile(p, re.IGNORECASE))
+            except re.error as exc:
+                # One bad pattern must not abort polling for every bridge.
+                if p not in _WARNED_BAD_PATTERNS:
+                    _WARNED_BAD_PATTERNS.add(p)
+                    logger.warning("Ignoring invalid mention pattern %r: %s", p, exc)
+        return compiled
 
 
 # ── Plugin Registration ──────────────────────────────────────────────
