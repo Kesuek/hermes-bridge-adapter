@@ -8,6 +8,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **Mention patterns / allowed users as YAML lists:** `BridgeConfig._get_opt`
+  passed list values through `str()`, so a YAML list such as
+  `mention_patterns: ["(?i)@hermes", "(?i)hermes:"]` reached
+  `_compile_mention_patterns` as a Python repr, was comma-split, and compiled
+  `"['(?i)@hermes'"` → `re.error: unterminated character set`. The exception
+  escaped `_poll_all`, so every group-chat message needing a mention check
+  stayed unprocessed in the inbox. List values are now kept as JSON lists, one
+  shared parser handles YAML/JSON/repr/comma forms (comma-split only for plain
+  strings, so regexes like `a{1,2}` survive), an invalid pattern is skipped
+  with a single warning instead of aborting the poll, and YAML-list
+  `allowed_users` works too.
 - **T-094:** `write_private` (SDK) is now atomic — temp file with a uuid
   suffix (T-079 pattern) + `os.replace`. A concurrent reader (the adapter's
   inbox poller) sees either the old or the new file, never a torn write.
