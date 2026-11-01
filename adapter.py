@@ -321,6 +321,10 @@ class BridgeAdapter(BasePlatformAdapter):
         # threads — their own state file, loaded lazily on first access.
         self._a2a_digest_states: Optional[dict] = None
 
+        # a2a pending bundles (T-061F): crash-safe outbox for digest bundles —
+        # persisted before dispatch, removed after successful hand-off.
+        self._a2a_pending: Optional[list] = None
+
         # Registry directory (single source of truth for bridge identity)
         self._registry_dir = (
             self._bridge_dir / REGISTRY_DIR_NAME if self._bridge_dir else None
@@ -1783,6 +1787,37 @@ class BridgeAdapter(BasePlatformAdapter):
         self._save_a2a_digest_states()
         return "buffer"
 
+    def _a2a_pending_path(self) -> Path:
+        return (self._bridge_dir or Path()) / "a2a_pending_bundles.json"
+
+    def _load_a2a_pending(self) -> None:
+        p = self._a2a_pending_path()
+        data: list = []
+        try:
+            if p.exists():
+                raw = json.loads(p.read_text("utf-8"))
+                # canonical: {"bundles": [...]} (dict, fits _atomic_write_json);
+                # a bare list is accepted for recovery/hand-edited files
+                if isinstance(raw, dict) and isinstance(raw.get("bundles"), list):
+                    data = raw["bundles"]
+                elif isinstance(raw, list):
+                    data = raw
+        except (OSError, json.JSONDecodeError) as e:
+            logger.warning("a2a pending bundles unreadable: %s (%s)", p, e)
+        self._a2a_pending = data
+
+    def _a2a_pending_entries(self) -> list:
+        if not isinstance(self._a2a_pending, list):
+            self._load_a2a_pending()
+        return self._a2a_pending if isinstance(self._a2a_pending, list) else []
+
+    def _save_a2a_pending(self) -> None:
+        if self._bridge_dir is None:
+            return
+        self._atomic_write_json(
+            self._a2a_pending_path(), {"bundles": self._a2a_pending_entries()}
+        )
+
     def _a2a_flush(self, peer: str, st: dict) -> str:
         """Empty the buffer into one bundle text; reset state + cooldown."""
         buf = st["buffer"]
@@ -1794,7 +1829,21 @@ class BridgeAdapter(BasePlatformAdapter):
             f"[{time.strftime('%H:%M', time.localtime(m['ts']))}] "
             f"[{m['sender']}] {m['text']}" for m in buf
         )
-        return f"[a2a digest: {len(buf)} messages from {peer}]\n{lines}"
+        text = f"[a2a digest: {len(buf)} messages from {peer}]\n{lines}"
+        # T-061F: crash-safe outbox — persist the bundle BEFORE dispatch;
+        # _dispatch_a2a_bundle clears it after successful hand-off. A crash
+        # between flush and dispatch loses nothing: the flush timer's
+        # recovery pass re-dispatches undelivered entries (at-least-once;
+        # a crash after hand-off but before the clear can repeat a bundle —
+        # accepted, duplicate turns are harmless context noise).
+        entries = self._a2a_pending_entries()
+        entries.append({
+            "id": f"a2ab_{uuid.uuid4().hex[:12]}", "peer": peer,
+            "text": text, "ts": _now_iso(),
+        })
+        self._a2a_pending = entries
+        self._save_a2a_pending()
+        return text
 
     # ── protokoll lifecycle (T-059) ──────────────────────────────────
 
@@ -2151,9 +2200,17 @@ class BridgeAdapter(BasePlatformAdapter):
                 self._unlink_inbox_file(filepath)
                 return
             if act and act != "pass":
-                # Bundle text: swap it in and let the normal dispatch path
-                # build the event + routing context (one collected turn).
-                text = act
+                # Bundle: dispatch via the a2a outbox (T-061F — crash-safe,
+                # pending cleared after hand-off). Authorization runs inside
+                # handle_message (gateway framework), same as the direct
+                # path. The buffered messages AND the current message are
+                # already joined in the bundle text.
+                await self._dispatch_a2a_bundle(peer, act)
+                self._unlink_inbox_file(filepath)
+                return
+            # act == "pass": fall through to the normal single-message path
+            # (interactive turn, deliberately instant — the post-flush
+            # cooldown gates flushes, never interactive single messages).
 
         # User authorization is handled by the Gateway framework
         # (authz_mixin._is_user_authorized), which reads BRIDGE_ALLOWED_USERS
@@ -2838,10 +2895,13 @@ class BridgeAdapter(BasePlatformAdapter):
                 logger.warning("a2a digest flush error: %s", e)
 
     async def _flush_a2a_digests(self) -> None:
-        """Timer side of the a2a digest: flush idle windows, defer while a
-        post-flush cooldown is still active (T-080 semantics)."""
+        """Timer side of the a2a digest (T-061F): recover undelivered
+        bundles, then flush idle windows; both defer during a post-flush
+        cooldown (T-080 semantics)."""
+        for entry in list(self._a2a_pending_entries()):
+            await self._dispatch_a2a_bundle(entry["peer"], entry["text"])
         if self._a2a_digest_states is None:
-            return
+            self._load_a2a_digest_states()
         now = time.time()
         for peer, st in list(self._a2a_digest_states.items()):
             if not isinstance(st, dict) or st.get("state") != "digesting":
@@ -2858,7 +2918,12 @@ class BridgeAdapter(BasePlatformAdapter):
             await self._dispatch_a2a_bundle(peer, bundle)
 
     async def _dispatch_a2a_bundle(self, peer: str, bundle_text: str) -> None:
-        """Dispatch a flushed a2a bundle to the peer's DM session."""
+        """Dispatch a flushed a2a bundle to the peer's DM session (T-061F).
+
+        authorization runs inside handle_message (gateway framework), same
+        as the direct path. The matching pending-outbox entry is cleared
+        after the hand-off.
+        """
         source = SessionSource(
             platform=Platform("bridge-adapter"),
             chat_id=peer,
@@ -2874,6 +2939,21 @@ class BridgeAdapter(BasePlatformAdapter):
             raw_message={},
         )
         await self.handle_message(event)
+        # hand-off accepted — clear the matching pending entry, newest-first
+        entries = self._a2a_pending_entries()
+        for i in range(len(entries) - 1, -1, -1):
+            entry = entries[i]
+            if entry.get("peer") == peer and entry.get("text") == bundle_text:
+                del entries[i]
+                break
+        self._a2a_pending = entries
+        if entries:
+            self._save_a2a_pending()
+        else:
+            try:
+                self._a2a_pending_path().unlink(missing_ok=True)
+            except OSError:
+                pass
 
     # ── Cleanup ─────────────────────────────────────────────────────
 

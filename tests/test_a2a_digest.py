@@ -4,8 +4,15 @@
 own state file (``a2a_digest_states.json``), its own flush loop, and no
 unified-thread involvement. Runs against the ``adapter`` module directly,
 mirroring ``test_unified.py``.
+
+T-061F additions: crash-safe bundle outbox (persist before dispatch, clear
+after hand-off, timer recovery pass) and the deliberate post-flush cooldown
+divergence — the cooldown gates flushes, never interactive single messages
+(direct-messaging design goal: fast interactive turns between agents; the
+unified T-080 buffering rule belongs to the mute/read-only regime).
 """
 import asyncio
+import json
 import sys
 import time
 from pathlib import Path
@@ -59,6 +66,14 @@ def _make_adapter(tmp_path: Path) -> BridgeAdapter:
     return BridgeAdapter(cfg)
 
 
+def _seed_series(a: BridgeAdapter, peer: str = "P1"):
+    """pass + buffer pair, then force the window open (elapsed)."""
+    assert a._a2a_note_digest(peer, peer, "m1") == "pass"
+    assert a._a2a_note_digest(peer, peer, "m2") == "buffer"
+    st = a._a2a_digest_state(peer)
+    st["digest_until"] = time.time() - 1  # window elapsed before m3 arrives
+
+
 # ── Bridge selection ────────────────────────────────────────────────
 
 
@@ -101,10 +116,7 @@ def test_series_opens_window_and_buffers(tmp_path):
 
 def test_window_elapsed_next_entry_flushes_bundle(tmp_path):
     a = _make_adapter(tmp_path)
-    a._a2a_note_digest("P1", "P1", "m1")  # pass
-    a._a2a_note_digest("P1", "P1", "m2")  # buffer, window opens
-    st = a._a2a_digest_state("P1")
-    st["digest_until"] = time.time() - 1  # window elapsed before m3 arrives
+    _seed_series(a)
     out = a._a2a_note_digest("P1", "P1", "m3")
     assert out.startswith("[a2a digest: 2 messages")
     assert "m2" in out and "m3" in out
@@ -167,3 +179,58 @@ def test_timer_defers_during_cooldown(tmp_path):
     asyncio.run(a._flush_a2a_digests())
     a.handle_message.assert_not_awaited()
     assert a._a2a_digest_state("P1")["state"] == "digesting"
+
+
+# ── T-061F: crash-safe bundle outbox ────────────────────────────────
+
+
+def test_flush_persists_pending_outbox_then_clears_after_handoff(tmp_path):
+    a = _make_adapter(tmp_path)
+    _seed_series(a)
+    text = a._a2a_note_digest("P1", "P1", "m3")
+    assert text.startswith("[a2a digest: 2 messages")
+    # the flush left the bundle in the pending outbox file until hand-off
+    pending_file = tmp_path / "bridge" / "a2a_pending_bundles.json"
+    raw = json.loads(pending_file.read_text("utf-8"))
+    assert len(raw["bundles"]) == 1
+    assert raw["bundles"][0]["peer"] == "P1"
+    assert raw["bundles"][0]["text"] == text
+    # hand-off: dispatch clears the entry — and the file, when it is empty
+    a.handle_message = AsyncMock()
+    asyncio.run(a._dispatch_a2a_bundle("P1", text))
+    assert a._a2a_pending_entries() == []
+    assert not pending_file.exists()
+
+
+def test_flush_timer_recovers_undelivered_bundle(tmp_path):
+    a = _make_adapter(tmp_path)
+    # simulate a crash between flush and dispatch: a stale pending entry
+    stale = {"id": "a2ab_deadbeef", "peer": "P9", "text": "recovered bundle", "ts": "x"}
+    (tmp_path / "bridge" / "a2a_pending_bundles.json").write_text(
+        json.dumps([stale]), encoding="utf-8"
+    )
+    a.handle_message = AsyncMock()
+    asyncio.run(a._flush_a2a_digests())
+    a.handle_message.assert_awaited_once()
+    ev = a.handle_message.await_args.args[0]
+    assert ev.text == "recovered bundle"
+    assert ev.source.chat_id == "P9"
+    # delivered → recovered entry cleared
+    assert a._a2a_pending_entries() == []
+
+
+# ── T-061F: deliberately divergent cooldown (interactive stays instant) ──
+
+
+def test_single_message_after_flush_is_not_gated_by_cooldown(tmp_path):
+    a = _make_adapter(tmp_path)
+    _seed_series(a)
+    text = a._a2a_note_digest("P1", "P1", "m3")
+    assert text.startswith("[a2a digest:")  # flushed → cooldown_until set
+    st = a._a2a_digest_state("P1")
+    assert st["cooldown_until"] > time.time()  # post-flush cooldown active
+    # an isolated message within the cooldown window (gap > series gap):
+    # the interactive turn must dispatch immediately — the post-flush
+    # cooldown gates flushes, never interactive single messages
+    st["last_inbound_ts"] = time.time() - 60  # not a series
+    assert a._a2a_note_digest("P1", "P1", "solo") == "pass"
