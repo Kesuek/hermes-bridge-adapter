@@ -317,6 +317,10 @@ class BridgeAdapter(BasePlatformAdapter):
         self._bridge_configs: dict[str, BridgeConfig] = {}
         self._manifests: dict[str, BridgeManifest] = {}
 
+        # a2a digest states (T-061E): adaptive coalesce OUTSIDE unified
+        # threads — their own state file, loaded lazily on first access.
+        self._a2a_digest_states: Optional[dict] = None
+
         # Registry directory (single source of truth for bridge identity)
         self._registry_dir = (
             self._bridge_dir / REGISTRY_DIR_NAME if self._bridge_dir else None
@@ -437,6 +441,10 @@ class BridgeAdapter(BasePlatformAdapter):
         # restarts.
         self._load_usernames()
 
+        # Load a2a digest states (T-061E) so an open coalesce window and
+        # its buffered series survive an adapter restart.
+        self._load_a2a_digest_states()
+
         # Whether or not any bridges are registered yet, the adapter boots
         # and the registry loop keeps watching for manifests to appear at
         # runtime. Zero bridges now is NOT a failure — the new registry
@@ -447,6 +455,7 @@ class BridgeAdapter(BasePlatformAdapter):
         self._cleanup_task = asyncio.create_task(self._cleanup_loop())
         self._status_task = asyncio.create_task(self._status_loop())
         self._silent_flush_task = asyncio.create_task(self._silent_flush_loop())
+        self._a2a_flush_task = asyncio.create_task(self._a2a_flush_loop())
         self._mark_connected()
 
         if not self._bridges:
@@ -472,6 +481,7 @@ class BridgeAdapter(BasePlatformAdapter):
             self._status_task,
             self._registry_task,
             self._silent_flush_task,
+            self._a2a_flush_task,
         ):
             if task:
                 task.cancel()
@@ -484,6 +494,7 @@ class BridgeAdapter(BasePlatformAdapter):
         self._status_task = None
         self._registry_task = None
         self._silent_flush_task = None
+        self._a2a_flush_task = None
         self._mark_disconnected()
         logger.info("Bridge adapter disconnected")
 
@@ -1635,6 +1646,17 @@ class BridgeAdapter(BasePlatformAdapter):
     PARSE_FAILURE_LIMIT = 3  # failed inbox parses before quarantine (T-098)
     ADAPTIVE_COOLDOWN = 10  # seconds post-flush cooldown
 
+    # ── a2a digest (T-061E) ── adaptive coalesce outside unified threads.
+    # Design (2026-11-01, discussion with NovaForge): the first message of
+    # a quiet channel dispatches immediately; a true series (a message
+    # arriving <= A2A_SERIE_GAP after the previous inbound) opens the
+    # digest window; buffered messages flush as ONE bundled turn when the
+    # window elapses (idle timer) or the burst cap is reached.
+    A2A_BRIDGE_DEFAULT = "a2a"  # override via A2A_DIGEST_BRIDGES env (csv); empty/"off" disables
+    A2A_SERIE_GAP = 20.0    # s — series detection
+    A2A_DIGEST_WINDOW = 25.0  # s — window once open, then flush
+    A2A_BURST_CAP = 8       # messages — flush regardless when reached
+
     def _adaptive_state(self, name: str) -> dict:
         """Return the adaptive state dict for a thread, initialising it.
 
@@ -1683,6 +1705,96 @@ class BridgeAdapter(BasePlatformAdapter):
         st["buffer"].append({"ts": now, "sender": sender, "text": text})
         self._save_unified_threads()
         return "dispatch"
+
+    # ── a2a digest (T-061E): adaptive coalesce without unified threads ─
+
+    def _a2a_digest_bridges(self) -> frozenset:
+        """Bridges running the a2a digest (T-061E); A2A_DIGEST_BRIDGES env
+        csv overrides, empty/"off" disables."""
+        raw = os.getenv("A2A_DIGEST_BRIDGES", self.A2A_BRIDGE_DEFAULT)
+        if raw.strip().lower() in ("", "off", "0", "false", "no"):
+            return frozenset()
+        return frozenset(b.strip() for b in raw.split(",") if b.strip())
+
+    def _a2a_digest_path(self) -> Path:
+        return (self._bridge_dir or Path()) / "a2a_digest_states.json"
+
+    def _load_a2a_digest_states(self) -> None:
+        self._a2a_digest_states = {}
+        p = self._a2a_digest_path()
+        try:
+            if p.exists():
+                data = json.loads(p.read_text("utf-8"))
+                if isinstance(data, dict):
+                    self._a2a_digest_states = data
+        except (OSError, json.JSONDecodeError) as e:
+            logger.warning(
+                "a2a digest states unreadable: %s (%s) — starting fresh", p, e
+            )
+
+    def _save_a2a_digest_states(self) -> None:
+        if self._bridge_dir is None:
+            return
+        self._atomic_write_json(
+            self._a2a_digest_path(), self._a2a_digest_states or {}
+        )
+
+    def _a2a_digest_state(self, peer: str) -> dict:
+        if self._a2a_digest_states is None:
+            self._a2a_digest_states = {}
+        return self._a2a_digest_states.setdefault(peer, {
+            "state": "active",
+            "buffer": [],
+            "last_inbound_ts": 0.0,
+            "digest_until": 0.0,
+            "cooldown_until": 0.0,
+        })
+
+    def _a2a_note_digest(self, peer: str, sender: str, text: str) -> str:
+        """Adaptive a2a coalesce (T-061E).
+
+        Returns ``"pass"`` to dispatch immediately (first message of a
+        quiet channel or an isolated message), ``"buffer"`` to swallow
+        the message into the open digest window, or the bundle text to
+        dispatch as one collected turn (burst cap or window elapsed on
+        entry).
+        """
+        st = self._a2a_digest_state(peer)
+        now = time.time()
+        if st["state"] == "active":
+            gap = now - st.get("last_inbound_ts", 0.0)
+            st["last_inbound_ts"] = now
+            if gap <= self.A2A_SERIE_GAP:
+                # True series: open the window, starting with this message.
+                st["state"] = "digesting"
+                st["buffer"] = [{"ts": now, "sender": sender, "text": text}]
+                st["digest_until"] = now + self.A2A_DIGEST_WINDOW
+                self._save_a2a_digest_states()
+                return "buffer"
+            return "pass"
+        # digesting
+        if now < st.get("cooldown_until", 0):  # T-080 semantics
+            st["buffer"].append({"ts": now, "sender": sender, "text": text})
+            self._save_a2a_digest_states()
+            return "buffer"
+        st["buffer"].append({"ts": now, "sender": sender, "text": text})
+        if now >= st["digest_until"] or len(st["buffer"]) >= self.A2A_BURST_CAP:
+            return self._a2a_flush(peer, st)
+        self._save_a2a_digest_states()
+        return "buffer"
+
+    def _a2a_flush(self, peer: str, st: dict) -> str:
+        """Empty the buffer into one bundle text; reset state + cooldown."""
+        buf = st["buffer"]
+        st["buffer"] = []
+        st["state"] = "active"
+        st["cooldown_until"] = time.time() + self.ADAPTIVE_COOLDOWN
+        self._save_a2a_digest_states()
+        lines = "\n".join(
+            f"[{time.strftime('%H:%M', time.localtime(m['ts']))}] "
+            f"[{m['sender']}] {m['text']}" for m in buf
+        )
+        return f"[a2a digest: {len(buf)} messages from {peer}]\n{lines}"
 
     # ── protokoll lifecycle (T-059) ──────────────────────────────────
 
@@ -2026,6 +2138,22 @@ class BridgeAdapter(BasePlatformAdapter):
                 return
             await self._handle_unified_command(bridge, data, filepath)
             return
+
+        # a2a digest (T-061E): adaptive coalesce for A2A peer traffic,
+        # deliberately outside unified threads (`mode=a2a` — same digest
+        # machinery pattern, own state file, own flush loop). Attachments
+        # bypass the digest; /unified commands never reach it (handled
+        # above).
+        if not data.get("attachments") and bridge in self._a2a_digest_bridges():
+            peer = chat_id or sender
+            act = self._a2a_note_digest(peer, sender, text)
+            if act == "buffer":
+                self._unlink_inbox_file(filepath)
+                return
+            if act and act != "pass":
+                # Bundle text: swap it in and let the normal dispatch path
+                # build the event + routing context (one collected turn).
+                text = act
 
         # User authorization is handled by the Gateway framework
         # (authz_mixin._is_user_authorized), which reads BRIDGE_ALLOWED_USERS
@@ -2688,6 +2816,56 @@ class BridgeAdapter(BasePlatformAdapter):
             user_id=first.get("user_id", ""),
             user_name=first.get("user_name", ""),
             thread_id=name,
+        )
+        event = MessageEvent(
+            text=bundle_text,
+            message_type=MessageType.TEXT,
+            source=source,
+            raw_message={},
+        )
+        await self.handle_message(event)
+
+    async def _a2a_flush_loop(self) -> None:
+        """Idle flush for a2a digests (T-061E): tick every 5 s and flush
+        any open window whose digest_until has elapsed (flush-at-idle)."""
+        while self._running:
+            try:
+                await asyncio.sleep(5.0)
+                await self._flush_a2a_digests()
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.warning("a2a digest flush error: %s", e)
+
+    async def _flush_a2a_digests(self) -> None:
+        """Timer side of the a2a digest: flush idle windows, defer while a
+        post-flush cooldown is still active (T-080 semantics)."""
+        if self._a2a_digest_states is None:
+            return
+        now = time.time()
+        for peer, st in list(self._a2a_digest_states.items()):
+            if not isinstance(st, dict) or st.get("state") != "digesting":
+                continue
+            if now < st.get("cooldown_until", 0):
+                continue
+            if now < st.get("digest_until", 0):
+                continue
+            if not st.get("buffer"):
+                st["state"] = "active"
+                self._save_a2a_digest_states()
+                continue
+            bundle = self._a2a_flush(peer, st)
+            await self._dispatch_a2a_bundle(peer, bundle)
+
+    async def _dispatch_a2a_bundle(self, peer: str, bundle_text: str) -> None:
+        """Dispatch a flushed a2a bundle to the peer's DM session."""
+        source = SessionSource(
+            platform=Platform("bridge-adapter"),
+            chat_id=peer,
+            chat_name=peer,
+            chat_type="direct",
+            user_id=peer,
+            user_name=peer,
         )
         event = MessageEvent(
             text=bundle_text,
