@@ -331,3 +331,37 @@ def test_bundle_session_is_routable_and_silent_ok(tmp_path):
     assert event.reply_expected is False
     # Crash-safe pending entry cleared after the hand-off.
     assert a._a2a_pending_entries() == []
+
+
+def test_human_bridge_media_message_is_not_dropped(tmp_path):
+    """Human-shape bridge (non a2a-service manifest): an empty-text media
+    message must NOT hit the ack-drop (media-only turns stay working)."""
+    a = _make_adapter(tmp_path)
+    a.handle_message = AsyncMock()
+
+    async def run():
+        return await a._process_incoming("imsg", {
+            "sender": "ronny", "text": "",
+            "attachments": [{"type": "image", "url": "img.png"}],
+            "chat": {"id": "u1", "type": "direct"},
+        }, tmp_path / "h1.json")
+
+    receipt = asyncio.run(run())
+    assert a.handle_message.await_count == 1
+    assert receipt["delivered_to_agent"] is True
+
+
+def test_human_bridge_turns_keep_reply_expected_none(tmp_path):
+    """Human bridge: no a2a-service manifest → reply_expected stays None."""
+    a = _make_adapter(tmp_path)
+    a.handle_message = AsyncMock()
+
+    async def run():
+        return await a._process_incoming("imsg", {
+            "sender": "ronny", "text": "hi",
+            "chat": {"id": "u1", "type": "direct"},
+        }, tmp_path / "h2.json")
+
+    asyncio.run(run())
+    event = a.handle_message.await_args[0][0]
+    assert event.reply_expected is None
