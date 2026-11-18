@@ -27,6 +27,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   do NOT fan out into a unified thread, the `unified~<name>:<name>`
   channel-directory id, member-key routing, the mirror dedupe_key
   contract, and the drop-reason matrix.
+- **T-061G port:** the a2a echo-loop guard + `reply_expected=False`
+ (agent-transport turns) and the routable digest-bundle session
+  (`a2a~<peer>`), previously deployed only on the plugin dir as commits
+  `6c98661`/`64f7aa8` (disjoint lineage), are now part of main again.
+  Guard drops carry new receipts (`a2a_echo_marker_empty`,
+  `a2a_echo_ack_dropped`).
 
 ### Fixed
 - **T-094:** `write_private` (SDK) is now atomic — temp file with a uuid

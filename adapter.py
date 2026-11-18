@@ -58,6 +58,17 @@ STATUS_POLL_INTERVAL = 60  # 1min
 REGISTRY_POLL_INTERVAL = 5.0  # seconds
 REGISTRY_DIR_NAME = "registry"
 MANIFEST_FIELDS = ["name", "service", "host", "target_format", "capabilities"]
+# Marker the a2a-service stamps on turns it mirrors back into the inbox as
+# echo copies of previously piped messages (observed on the NovaForge
+# bridge, 2026-11-01). See the echo-loop guard in _process_incoming.
+# (T-061G, ported from the deployed hotfix chain onto T-274.)
+A2A_ECHO_MARKER = "[a2a-service echo]"
+# The manifest service type for agent-to-agent transports: agents may
+# intentionally stay silent (NO_REPLY), so these turns carry
+# reply_expected=False instead of the human-chat default (unknown → silence
+# gets rejected with an auto notice, whose delivery the a2a-service then
+# mirrors back — the double-echo loop).
+A2A_AGENT_SERVICE = "a2a-service"
 DEFAULT_MENTION_PATTERNS = [
     r"(?<![\w@])@?hermes\s+agent\b[,:\-]?",
     r"(?<![\w@])@?hermes\b[,:\-]?",
@@ -2303,6 +2314,50 @@ class BridgeAdapter(BasePlatformAdapter):
                 reason="duplicate_id",
             )
 
+        # ── A2A echo-loop guard (T-061G) ────────────────────────────────
+        # The a2a-service mirrors piped turns back into the inbox as echo
+        # copies stamped "[a2a-service echo] …" and emits pure-ack turns
+        # whose payload is empty. Dispatching either spawns a fresh agent
+        # turn; when that turn silences (NO_REPLY), the gateway's
+        # silence-rejection notice is itself mirrored back, feeding the
+        # double-echo loop observed with NovaForge on 2026-11-01. Rules:
+        #   1. marker + empty payload          → drop silently.
+        #   2. marker + real payload           → strip marker, deliver.
+        #   3. a2a-service + empty text, no
+        #      attachments                     → drop silently (ack/echo).
+        # Human bridges are untouched: silence behavior and media-only
+        # messages (empty text + attachments) keep working exactly as
+        # before. The guard must sit BEFORE the /unified handling so echo
+        # copies never enter thread bookkeeping.
+        manifest = self._manifests.get(bridge)
+        agent_service = bool(
+            manifest and getattr(manifest, "service", None) == A2A_AGENT_SERVICE
+        )
+        guard_text = text.strip()
+        if guard_text.startswith(A2A_ECHO_MARKER):
+            echo_payload = guard_text[len(A2A_ECHO_MARKER):].strip()
+            if not echo_payload:
+                logger.info(
+                    "A2A echo-loop guard: dropped marker turn with empty "
+                    "payload (bridge '%s'): %s", bridge, filepath,
+                )
+                self._unlink_inbox_file(filepath)
+                return self._write_delivery_receipt(
+                    bridge, data, filepath, delivered=False,
+                    reason="a2a_echo_marker_empty",
+                )
+            text = echo_payload
+        elif agent_service and not guard_text and not data.get("attachments"):
+            logger.info(
+                "A2A echo-loop guard: dropped empty-payload turn "
+                "(bridge '%s'): %s", bridge, filepath,
+            )
+            self._unlink_inbox_file(filepath)
+            return self._write_delivery_receipt(
+                bridge, data, filepath, delivered=False,
+                reason="a2a_echo_ack_dropped",
+            )
+
         # /unified commands (T-058): treat as adapter command, not a normal
         # message. Parsed and dispatched here so they never reach the agent.
         # Alias: /u <sub> is shorthand for /unified <sub> (T-067).
@@ -2722,6 +2777,12 @@ class BridgeAdapter(BasePlatformAdapter):
             media_types=media_types,
             reply_to_message_id=data.get("reply_to"),
             message_id=gateway_msg_id,
+            # T-061G: agent-to-agent transports — intentional silence
+            # (NO_REPLY) is legitimate; the peer's loop guard handles absent
+            # replies. Without this the gateway rejects the silence marker
+            # and sends an auto notice, which the a2a-service echoes back
+            # (loop fuel).
+            reply_expected=False if agent_service else None,
         )
 
         # Register the gateway_msg_id → {bridge, local_msg_id} mapping so
@@ -3135,9 +3196,16 @@ class BridgeAdapter(BasePlatformAdapter):
         as the direct path. The matching pending-outbox entry is cleared
         after the hand-off.
         """
+        # T-061G: a2a digest bundles must keep the ROUTABLE chat_id
+        # (<bridge>~<target>, T-056) — a bare peer id creates a session
+        # whose replies cannot route (the 02:18 digest turns delivered
+        # to bare "RYBFNMET"; the 1759-char reply was lost). The a2a
+        # digest is scoped to a2a-service bridges; the prefix is the
+        # bridge name's routable form.
+        routable = peer if "~" in peer else f"a2a~{peer}"
         source = SessionSource(
             platform=Platform("bridge-adapter"),
-            chat_id=peer,
+            chat_id=routable,
             chat_name=peer,
             chat_type="direct",
             user_id=peer,
@@ -3148,6 +3216,9 @@ class BridgeAdapter(BasePlatformAdapter):
             message_type=MessageType.TEXT,
             source=source,
             raw_message={},
+            # T-061G: the bundle is an agent-to-agent turn — silence stays
+            # legitimate.
+            reply_expected=False,
         )
         await self.handle_message(event)
         # hand-off accepted — clear the matching pending entry, newest-first

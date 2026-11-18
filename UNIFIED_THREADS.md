@@ -153,6 +153,8 @@ Every inbound *message* path produces a deliver receipt — returned by `_proces
 | `silent_buffered` | `silent` (mute) buffering — no turn *yet* |
 | `protokoll_collected` | Collected into an open protokoll session |
 | `a2a_digest_buffered` | Buffered into the a2a digest window (T-061E) |
+| `a2a_echo_marker_empty` | `[a2a-service echo]` copy with empty payload (T-061G echo-loop guard) |
+| `a2a_echo_ack_dropped` | a2a-service empty ack/echo turn (T-061G echo-loop guard) |
 | `adaptive_digest_buffered` | Participant-mode adaptive window still open |
 | `adaptive_frequency_buffered` | Adaptive frequency threshold hit (T-061) |
 | `group_no_mention` | Non-direct chat without a mention |

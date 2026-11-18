@@ -164,7 +164,7 @@ def test_timer_flushes_idle_bundle(tmp_path):
     a.handle_message.assert_awaited_once()
     ev = a.handle_message.await_args.args[0]
     assert "m2" in ev.text
-    assert ev.source.chat_id == "P1"
+    assert ev.source.chat_id == "a2a~P1"  # T-061G: routable session
     assert ev.source.chat_type == "direct"
     assert a._a2a_digest_state("P1")["state"] == "active"
 
@@ -214,7 +214,7 @@ def test_flush_timer_recovers_undelivered_bundle(tmp_path):
     a.handle_message.assert_awaited_once()
     ev = a.handle_message.await_args.args[0]
     assert ev.text == "recovered bundle"
-    assert ev.source.chat_id == "P9"
+    assert ev.source.chat_id == "a2a~P9"  # T-061G: routable session
     # delivered → recovered entry cleared
     assert a._a2a_pending_entries() == []
 
@@ -234,3 +234,100 @@ def test_single_message_after_flush_is_not_gated_by_cooldown(tmp_path):
     # cooldown gates flushes, never interactive single messages
     st["last_inbound_ts"] = time.time() - 60  # not a series
     assert a._a2a_note_digest("P1", "P1", "solo") == "pass"
+
+# ── T-061G: a2a echo-loop guard + routable bundle sessions ────────────
+
+
+def _with_manifest(a, bridge: str, service: str):
+    from adapter import BridgeManifest
+
+    a._manifests[bridge] = BridgeManifest(
+        name=bridge, service=service,
+        target_format=["chat_id"], capabilities=["text"],
+    )
+
+
+def test_echo_marker_empty_payload_dropped(tmp_path):
+    """Marker echo with no payload: dropped silently (no turn, receipt)."""
+    a = _make_adapter(tmp_path)
+    _with_manifest(a, "a2a", "a2a-service")
+    a.handle_message = AsyncMock()
+
+    async def run():
+        return await a._process_incoming("a2a", {
+            "sender": "P1", "text": "[a2a-service echo]   ",
+            "chat": {"id": "P1", "type": "direct"},
+        }, tmp_path / "e1.json")
+
+    receipt = asyncio.run(run())
+    assert a.handle_message.await_count == 0
+    assert receipt["delivered_to_agent"] is False
+    assert receipt["drop_reason"] == "a2a_echo_marker_empty"
+
+
+def test_echo_marker_real_payload_delivered_stripped(tmp_path):
+    """Marker echo carrying a real payload: marker stripped, delivered."""
+    a = _make_adapter(tmp_path)
+    _with_manifest(a, "a2a", "a2a-service")
+    a.handle_message = AsyncMock()
+
+    async def run():
+        return await a._process_incoming("a2a", {
+            "sender": "P1", "text": "[a2a-service echo] actual content",
+            "chat": {"id": "P1", "type": "direct"},
+        }, tmp_path / "e2.json")
+
+    receipt = asyncio.run(run())
+    assert a.handle_message.await_count == 1
+    assert receipt["delivered_to_agent"] is True
+    event = a.handle_message.await_args[0][0]
+    assert ("[a2a-service echo]") not in event.text
+    assert "actual content" in event.text
+    # Agent-transport turns: intentional silence is legitimate (T-061G).
+    assert event.reply_expected is False
+
+
+def test_agent_service_empty_ack_dropped_media_only_passes(tmp_path):
+    """a2a-service empty payload (no attachments) → ack-drop; a media-only
+    message (empty text + attachments) still flows."""
+    a = _make_adapter(tmp_path)
+    _with_manifest(a, "a2a", "a2a-service")
+    a.handle_message = AsyncMock()
+
+    async def run1():
+        return await a._process_incoming("a2a", {
+            "sender": "P1", "text": "",
+            "chat": {"id": "P1", "type": "direct"},
+        }, tmp_path / "a1.json")
+
+    receipt = asyncio.run(run1())
+    assert a.handle_message.await_count == 0
+    assert receipt["drop_reason"] == "a2a_echo_ack_dropped"
+
+    async def run2():
+        return await a._process_incoming("a2a", {
+            "sender": "P1", "text": "",
+            "attachments": [{"type": "image", "url": "missing"}],
+            "chat": {"id": "P1", "type": "direct"},
+        }, tmp_path / "a2.json")
+
+    receipt2 = asyncio.run(run2())
+    assert a.handle_message.await_count == 1
+    assert receipt2["delivered_to_agent"] is True
+    # Every a2a-service turn is an agent-transport turn: silence OK.
+    event = a.handle_message.await_args[0][0]
+    assert event.reply_expected is False
+
+
+def test_bundle_session_is_routable_and_silent_ok(tmp_path):
+    """T-061G: digest bundle turns carry the ROUTABLE chat_id
+    (a2a~<peer>) + reply_expected=False — a bare peer id made every
+    digest turn a reply-less, non-routable session."""
+    a = _make_adapter(tmp_path)
+    a.handle_message = AsyncMock()
+    asyncio.run(a._dispatch_a2a_bundle("T7B9P4FM", "[a2a digest: 1 messages from T7B9P4FM]\nx"))
+    event = a.handle_message.await_args[0][0]
+    assert event.source.chat_id == "a2a~T7B9P4FM"
+    assert event.reply_expected is False
+    # Crash-safe pending entry cleared after the hand-off.
+    assert a._a2a_pending_entries() == []
