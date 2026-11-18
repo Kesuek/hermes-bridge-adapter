@@ -20,6 +20,7 @@ Directory structure::
 """
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -664,14 +665,21 @@ class BridgeAdapter(BasePlatformAdapter):
         """
         if not local_id:
             return
-        key = f"{bridge}~{local_id}"
+        self._record_seen_key(f"{bridge}~{local_id}")
+
+    def _record_seen_key(self, raw_key: str) -> None:
+        """Record one seen-dedup key with TTL prune + cap + persist.
+
+        Shared ledger writer for both namespaces in ``dedup_map.json``
+        (T-100: ``bridge~local_id``; T-274: ``dk~<dedupe_key>``).
+        """
         now = time.time()
         ttl = self.DEDUP_TTL
         pruned = {
             k: v for k, v in self._dedup_map.items()
             if now - float(v.get("ts", 0)) < ttl
         }
-        pruned[key] = {"ts": now}
+        pruned[raw_key] = {"ts": now}
         cap = self.DEDUP_CAP
         if len(pruned) > cap:
             kept = sorted(
@@ -699,6 +707,111 @@ class BridgeAdapter(BasePlatformAdapter):
         if key in self._dedup_map:
             return True
         return False
+
+    # ── Mirror dedupe_key (T-274 P2) ─────────────────────────────────
+    #
+    # Unified-thread mirror copies identify the LOGICAL message they carry
+    # via ``metadata.dedupe_key`` instead of the transport-local id. a2a
+    # wrappers mint a fresh request/file id per hop, so a copy that loops
+    # back through the relay chain carries a NEW ``id`` every hop (the live
+    # P2 finding: triple-mirrored messages in a thread whose members are all
+    # a2a peers). The dedupe_key is minted once by the FIRST dispatch of the
+    # logical message and propagated verbatim by every mirror; a copy coming
+    # back with a seen key is dropped before any turn or relay. Keys live in
+    # the same ``dedup_map.json`` ledger as T-100, namespaced ``dk~``.
+    DEDUP_KEY_PREFIX = "dk~"
+
+    @staticmethod
+    def _mint_dedupe_key(gateway_msg_id: str) -> str:
+        """Stable per-dispatch identity: hash of the gateway_msg_id."""
+        digest = hashlib.sha256(str(gateway_msg_id).encode("utf-8")).hexdigest()
+        return f"bdk1-{digest[:16]}"
+
+    @staticmethod
+    def _inbound_dedupe_key(data: dict) -> str:
+        """Extract ``metadata.dedupe_key`` from an inbound inbox JSON (or '')."""
+        meta = data.get("metadata")
+        if isinstance(meta, dict):
+            key = meta.get("dedupe_key")
+            if isinstance(key, str) and key.strip():
+                return key.strip()
+        return ""
+
+    def _is_seen_dedupe_key(self, key: str) -> bool:
+        """True if this dedupe_key was already dispatched (T-274 P2)."""
+        return bool(key) and (self.DEDUP_KEY_PREFIX + key) in self._dedup_map
+
+    def _record_dedupe_key(self, key: str) -> None:
+        """Record a dedupe_key in the persisted ledger (T-274 P2)."""
+        if not key:
+            return
+        self._record_seen_key(self.DEDUP_KEY_PREFIX + key)
+
+    # ── Deliver receipts (T-274 P5) ──────────────────────────────────
+    #
+    # Every inbound MESSAGE path either dispatches a turn or drops. The
+    # outcome is returned by ``_process_incoming`` and appended to
+    # ``delivery_receipts/<bridge>.jsonl`` so the wrapper side can read
+    # back what happened to a message: regular turn →
+    # ``delivered_to_agent: true`` (``drop_reason`` null); every adapter-
+    # level drop → ``false`` plus a ``drop_reason``.
+    #
+    # Receipt reasons (T-274 P5): dedupe_key_seen | duplicate_id |
+    # missing_sender | mode_reactive_no_mention | mode_off |
+    # silent_buffered | protokoll_collected | a2a_digest_buffered |
+    # adaptive_digest_buffered | adaptive_frequency_buffered |
+    # group_no_mention. Reactions and /unified commands have their own
+    # reply/ack semantics → no receipt (documented, returns None).
+    DELIVERY_RECEIPT_CAP = 500
+
+    def delivery_receipts_path(self, bridge: str) -> Path:
+        """Path to the per-bridge delivery receipt JSONL file."""
+        return (
+            self._bridge_dir / "delivery_receipts" / f"{bridge}.jsonl"
+            if self._bridge_dir else Path()
+        )
+
+    def _write_delivery_receipt(
+        self, bridge: str, data: dict, filepath: Path, *,
+        delivered: bool, reason: Optional[str] = None,
+        dedupe_key: str = "",
+    ) -> dict:
+        """Append one receipt line to ``delivery_receipts/<bridge>.jsonl``.
+
+        Best-effort (a receipt failure must never break dispatch) and
+        bounded (keeps the last ``DELIVERY_RECEIPT_CAP`` lines). Returns
+        the receipt dict — this is the Task-Result shape the wrapper side
+        (and callers of ``_process_incoming``) see.
+        """
+        receipt = {
+            "ts": _now_iso(),
+            "bridge": bridge,
+            "file": filepath.name,
+            "message_id": data.get("id") or data.get("message_id") or "",
+            "dedupe_key": dedupe_key or self._inbound_dedupe_key(data),
+            "delivered_to_agent": bool(delivered),
+            "drop_reason": reason,
+        }
+        p = self.delivery_receipts_path(bridge)
+        if p:
+            lines: list[str] = []
+            try:
+                if p.exists():
+                    lines = p.read_text("utf-8").splitlines()
+            except OSError:
+                lines = []
+            lines.append(json.dumps(receipt, ensure_ascii=False))
+            del lines[:-self.DELIVERY_RECEIPT_CAP]
+            try:
+                p.parent.mkdir(parents=True, exist_ok=True)
+                tmp = p.with_suffix(".jsonl.tmp")
+                tmp.write_text(
+                    "\n".join(lines) + "\n", encoding="utf-8")
+                os.replace(tmp, p)
+            except OSError as e:
+                logger.warning(
+                    "Delivery receipt write failed for %s: %s", p, e)
+        return receipt
 
     def _reply_map_path(self) -> Path:
         """Path to the ``reply_map.json`` persistence file."""
@@ -1056,7 +1169,8 @@ class BridgeAdapter(BasePlatformAdapter):
         }
 
     async def _relay_to_other_members(
-        self, unified_name: str, source_bridge: str, sender_name: str, text: str
+        self, unified_name: str, source_bridge: str, sender_name: str, text: str,
+        dedupe_key: str = "",
     ) -> None:
         """Mirror an inbound unified-thread message to the OTHER member bridges.
 
@@ -1070,6 +1184,11 @@ class BridgeAdapter(BasePlatformAdapter):
         it over the platform API); it never re-enters the inbox, so it can't
         be re-dispatched as an inbound message. Targets are deduped by
         ``(bridge, chat_id)`` — the same address is never written twice.
+
+        Each copy carries ``metadata.dedupe_key`` (T-274 P2): the LOGICAL
+        message identity, stable across hops. When the copy loops back into
+        an inbox through a wrapper chain, ``_process_incoming`` drops it
+        against the persisted ``dk~`` ledger.
         """
         thread = self._unified_threads.get(unified_name)
         if not thread:
@@ -1089,8 +1208,11 @@ class BridgeAdapter(BasePlatformAdapter):
         if not targets:
             return
         relay_text = f"[{sender_name}] {text}"
+        meta = {"dedupe_key": dedupe_key} if dedupe_key else None
         for mb, mc in targets:
-            await self._write_outbox(mb, f"{mb}~{mc}", text=relay_text)
+            await self._write_outbox(
+                mb, f"{mb}~{mc}", text=relay_text, metadata=meta,
+            )
 
     async def _send_reply(self, bridge: str, data: dict, message: str) -> None:
         """Write an outbox reply to the sender of a ``/unified`` command.
@@ -2117,12 +2239,18 @@ class BridgeAdapter(BasePlatformAdapter):
 
     async def _process_incoming(
         self, bridge: str, data: dict, filepath: Path
-    ) -> None:
-        """Parse an inbox JSON file and dispatch as MessageEvent or reaction."""
+    ) -> Optional[dict]:
+        """Parse an inbox JSON file and dispatch as MessageEvent or reaction.
+
+        Returns the deliver receipt (T-274 P5) for message paths —
+        ``{"delivered_to_agent": bool, "drop_reason": str | None}`` — or
+        ``None`` for reactions and ``/unified`` commands (their own ack
+        semantics, no receipt).
+        """
         # Check for reaction events
         if data.get("type") == "reaction":
             await self._process_reaction(bridge, data, filepath)
-            return
+            return None
 
         # Validate required fields
         sender = data.get("sender", "")
@@ -2134,7 +2262,31 @@ class BridgeAdapter(BasePlatformAdapter):
 
         if not sender:
             logger.warning("Inbox message missing 'sender', skipping %s", filepath)
-            return
+            return self._write_delivery_receipt(
+                bridge, data, filepath, delivered=False,
+                reason="missing_sender",
+            )
+
+        # T-274 P2: drop a mirrored copy whose dedupe_key is already in the
+        # persisted ledger BEFORE any turn, relay or command parsing (the
+        # loop-breaking gate; transport ids are fresh per hop and cannot
+        # catch re-id-ing wrapper chains). A first-sighting key is recorded
+        # immediately — crash-safe: a keyed message is effectively
+        # once-only, which is exactly right for traffic that was already
+        # mirrored once.
+        inbound_dedupe_key = self._inbound_dedupe_key(data)
+        if self._is_seen_dedupe_key(inbound_dedupe_key):
+            logger.info(
+                "Mirror copy suppressed (T-274): dedupe_key=%s bridge=%s",
+                inbound_dedupe_key, bridge,
+            )
+            self._unlink_inbox_file(filepath)
+            return self._write_delivery_receipt(
+                bridge, data, filepath, delivered=False,
+                reason="dedupe_key_seen", dedupe_key=inbound_dedupe_key,
+            )
+        if inbound_dedupe_key:
+            self._record_dedupe_key(inbound_dedupe_key)
 
         # T-100: drop wrapper-id duplicates before any dispatch (a crash
         # between dispatch and unlink, or a wrapper retry, must not send
@@ -2146,7 +2298,10 @@ class BridgeAdapter(BasePlatformAdapter):
                 bridge, data.get("id") or data.get("message_id"),
             )
             self._unlink_inbox_file(filepath)
-            return
+            return self._write_delivery_receipt(
+                bridge, data, filepath, delivered=False,
+                reason="duplicate_id",
+            )
 
         # /unified commands (T-058): treat as adapter command, not a normal
         # message. Parsed and dispatched here so they never reach the agent.
@@ -2184,9 +2339,9 @@ class BridgeAdapter(BasePlatformAdapter):
                     "(bridge=%s)", sender_id, bridge,
                 )
                 self._unlink_inbox_file(filepath)
-                return
+                return None
             await self._handle_unified_command(bridge, data, filepath)
-            return
+            return None
 
         # a2a digest (T-061E): adaptive coalesce for A2A peer traffic,
         # deliberately outside unified threads (`mode=a2a` — same digest
@@ -2198,7 +2353,10 @@ class BridgeAdapter(BasePlatformAdapter):
             act = self._a2a_note_digest(peer, sender, text)
             if act == "buffer":
                 self._unlink_inbox_file(filepath)
-                return
+                return self._write_delivery_receipt(
+                    bridge, data, filepath, delivered=False,
+                    reason="a2a_digest_buffered",
+                )
             if act and act != "pass":
                 # Bundle: dispatch via the a2a outbox (T-061F — crash-safe,
                 # pending cleared after hand-off). Authorization runs inside
@@ -2207,7 +2365,9 @@ class BridgeAdapter(BasePlatformAdapter):
                 # already joined in the bundle text.
                 await self._dispatch_a2a_bundle(peer, act)
                 self._unlink_inbox_file(filepath)
-                return
+                return self._write_delivery_receipt(
+                    bridge, data, filepath, delivered=True, reason=None,
+                )
             # act == "pass": fall through to the normal single-message path
             # (interactive turn, deliberately instant — the post-flush
             # cooldown gates flushes, never interactive single messages).
@@ -2218,6 +2378,21 @@ class BridgeAdapter(BasePlatformAdapter):
         # gate here: deleting the file before the gateway sees it would break
         # the DM pairing flow (a new user's first DM would be dropped before
         # the gateway can issue a pairing code). Let the framework decide.
+
+        # ── Stable gateway message_id (T-073) ───────────────────────────
+        # The framework does not auto-assign a message_id for plugin-emitted
+        # events (only in the text-debounce path), so ``event.message_id``
+        # would stay ``None`` and the reply map would be keyed by a throwaway
+        # uuid4 that no later ``reply_to`` can ever match. We mint a stable,
+        # per-inbound-message id and set it on the event below (so
+        # ``_reply_anchor_for_event(event)`` returns it) and register the
+        # reply map under that same value.
+        # Minted BEFORE the unified mapping so the T-063 relay can stamp a
+        # dedupe_key derived from it into every mirror copy (T-274 P2).
+        gateway_msg_id = str(uuid.uuid4())
+        # Receipt identity: set by the unified branch when a mirror key is
+        # minted/propagated; plain non-thread messages carry no key.
+        receipt_key = ""
 
         # Build session source. The session chat_id MUST be the routable
         # address (<bridge>~<target>, T-056) so the gateway can route a
@@ -2301,7 +2476,17 @@ class BridgeAdapter(BasePlatformAdapter):
             relay_name = self._resolve_unified_handle(bridge, sender)
             if relay_name.startswith("unified~"):
                 relay_name = relay_name[len("unified~"):]
-            await self._relay_to_other_members(unified_name, bridge, relay_name, text)
+            # T-274 P2: the logical message identity for this dispatch. A
+            # first-sighting copy that already carries a dedupe_key (a hop
+            # of a mirrored message) propagates ITS key so every further
+            # hop stays the same logical message; a fresh inbound mints one
+            # from its gateway_msg_id. Every mirror copy carries it — and
+            # the ledger saw/notes it, so a later loop-back hop is dropped.
+            mirror_key = inbound_dedupe_key or self._mint_dedupe_key(gateway_msg_id)
+            receipt_key = mirror_key
+            await self._relay_to_other_members(
+                unified_name, bridge, relay_name, text, dedupe_key=mirror_key,
+            )
         else:
             routable_chat_id = f"{bridge}~{chat_id}"
             source = SessionSource(
@@ -2334,14 +2519,20 @@ class BridgeAdapter(BasePlatformAdapter):
                 # Mention-gating like a group chat: drop the message and the
                 # inbox file so it isn't re-seen.
                 self._unlink_inbox_file(filepath)
-                return
+                return self._write_delivery_receipt(
+                    bridge, data, filepath, delivered=False,
+                    reason="mode_reactive_no_mention",
+                )
             if mode == "off":
                 # Off: the agent gets nothing — no context, no turn. Drop
                 # the message and the inbox file. (Distinct from `silent`,
                 # which is the mute switch: the agent reads along via digest
                 # but never replies.)
                 self._unlink_inbox_file(filepath)
-                return
+                return self._write_delivery_receipt(
+                    bridge, data, filepath, delivered=False,
+                    reason="mode_off",
+                )
             if mode == "silent":
                 # Silent (mute switch): the agent reads along but never
                 # replies. EVERY message is collected into a per-thread
@@ -2385,7 +2576,11 @@ class BridgeAdapter(BasePlatformAdapter):
                     st["digest_until"] = now + self.ADAPTIVE_DIGEST_INTERVAL
                     self._save_unified_threads()
                     self._unlink_inbox_file(filepath)
-                    return
+                    # Silence-guard (T-274 P5): buffered, no turn yet.
+                    return self._write_delivery_receipt(
+                        bridge, data, filepath, delivered=False,
+                        reason="silent_buffered",
+                    )
                 # Fall through to dispatch (the agent reads the digest but
                 # is instructed not to reply).
             if mode == "protokoll":
@@ -2405,7 +2600,10 @@ class BridgeAdapter(BasePlatformAdapter):
                     self._save_unified_threads()
                     # Not dispatched — protocol logs, doesn't reply.
                     self._unlink_inbox_file(filepath)
-                    return
+                    return self._write_delivery_receipt(
+                        bridge, data, filepath, delivered=False,
+                        reason="protokoll_collected",
+                    )
 
         # Adaptive digest (T-061): if the thread is in ``digesting`` state,
         # buffer the message instead of dispatching. Only applies in
@@ -2462,11 +2660,17 @@ class BridgeAdapter(BasePlatformAdapter):
                         st["digest_until"] = now + self.ADAPTIVE_DIGEST_INTERVAL
                         self._save_unified_threads()
                         self._unlink_inbox_file(filepath)
-                        return
+                        return self._write_delivery_receipt(
+                            bridge, data, filepath, delivered=False,
+                            reason="adaptive_digest_buffered",
+                        )
                     action = self._adaptive_note_message(unified_name, sender, text)
                     if action == "buffer":
                         self._unlink_inbox_file(filepath)
-                        return
+                        return self._write_delivery_receipt(
+                            bridge, data, filepath, delivered=False,
+                            reason="adaptive_frequency_buffered",
+                        )
 
         effective_text = f"{text}\n\n[{routing_ctx}]" if text else f"[{routing_ctx}]"
 
@@ -2503,14 +2707,11 @@ class BridgeAdapter(BasePlatformAdapter):
                     )
 
         # ── Stable gateway message_id (T-073) ───────────────────────────
-        # The framework does not auto-assign a message_id for plugin-emitted
-        # events (only in the text-debounce path), so ``event.message_id``
-        # would stay ``None`` and the reply map would be keyed by a throwaway
-        # uuid4 that no later ``reply_to`` can ever match. We mint a stable,
-        # per-inbound-message id, set it on the event (so
-        # ``_reply_anchor_for_event(event)`` returns it) and register the
-        # reply map under that same value.
-        gateway_msg_id = str(uuid.uuid4())
+        # ``gateway_msg_id`` was minted above (before the unified mapping)
+        # so the relay below could stamp ``metadata.dedupe_key`` — a hash of
+        # it — into every mirror copy (T-274 P2). The event carries the SAME
+        # id, so ``_reply_anchor_for_event(event)`` returns it and the reply
+        # map is registered under that same value.
 
         event = MessageEvent(
             text=effective_text,
@@ -2546,7 +2747,10 @@ class BridgeAdapter(BasePlatformAdapter):
             # gateway restarts (the "needs a restart" bug). Mirror the
             # is_user_allowed path which also unlinks.
             self._unlink_inbox_file(filepath)
-            return
+            return self._write_delivery_receipt(
+                bridge, data, filepath, delivered=False,
+                reason="group_no_mention",
+            )
 
         # T-100: record the wrapper-local id BEFORE dispatch. If a crash
         # happens between here and the unlink, the id is already recorded,
@@ -2560,6 +2764,13 @@ class BridgeAdapter(BasePlatformAdapter):
 
         # Remove processed file
         self._unlink_inbox_file(filepath)
+
+        # T-274 P5: the event passed every adapter-level gate and was handed
+        # to the gateway framework for an agent turn.
+        return self._write_delivery_receipt(
+            bridge, data, filepath, delivered=True, reason=None,
+            dedupe_key=receipt_key,
+        )
 
     async def _process_reaction(
         self, bridge: str, data: dict, filepath: Path
@@ -3173,8 +3384,13 @@ class BridgeAdapter(BasePlatformAdapter):
         self, bridge: str, chat_id: str, text: str = "",
         attachments: list = None, typing: bool = False,
         reply_to: str = None, thread_id: str = None,
+        metadata: dict = None,
     ) -> SendResult:
-        """Write a JSON file to the outbox directory."""
+        """Write a JSON file to the outbox directory.
+
+        ``metadata`` (T-274 P2) rides the outbox JSON's ``metadata`` field —
+        mirror copies pass a ``{"dedupe_key": ...}``; plain sends keep ``{}``.
+        """
         outbox_dir = self._bridge_dir / "outbox" / bridge
         outbox_dir.mkdir(parents=True, exist_ok=True)
 
@@ -3188,7 +3404,7 @@ class BridgeAdapter(BasePlatformAdapter):
             "typing": typing,
             "reply_to": reply_to,
             "thread_id": thread_id,
-            "metadata": {},
+            "metadata": dict(metadata or {}),
         }
 
         filepath = outbox_dir / f"{msg_id}.json"

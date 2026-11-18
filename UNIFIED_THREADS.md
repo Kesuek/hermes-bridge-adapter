@@ -78,6 +78,14 @@ A user with multiple unified threads picks one as their **active thread** via `/
 - **No mode interaction** — the message is written directly to the outbox; it does not pass through the adaptive buffer or mode gating (those apply to *inbound* dispatch, this is *outbound*).
 - **Use case** — reply to a thread from a context where you don't want to switch (e.g. a quick ping from another bridge), or send as a one-off without committing.
 
+## Direct sends stay direct (T-274 P9)
+
+**Direct sends do not fan out into the unified thread.** `send()` / `send_image()` / `send_document()` with a *direct* target (`<bridge>~<target>`, e.g. `a2a~T7B9P4FM` or `talk~9q2tzmes`) never fan out into a unified thread — even when the addressed member belongs to one. A direct send writes exactly **one** outbox JSON for exactly that address; the other members' outboxes stay untouched. Only the special-cased `unified~<name>` target multicasts into the thread.
+
+- **Thread address in the channel directory** — the gateway lists a unified-thread session as **`unified~<name>:<name>`** (the `chat_id:thread_id` pair, e.g. `unified~fabric:fabric`, `type: "thread"`). That is a descriptive directory id only; the address you *send to* remains the plain `unified~<name>`.
+- **Membership mapping goes over the member keys, not the directory** — inbound routing matches `{bridge}:{chat_id}` against the thread's top-level member keys and the merged `addresses` arrays (plus the active-thread fallback, T-064). Directory ids are descriptive and never used for routing.
+- **Why it matters** — a peer agent that answers a thread member *directly* (its own DM) stays out of the team conversation; nobody else's outbox gets a copy and the thread session is not involved. Mirroring of *inbound* member messages into other member bridges is covered separately by T-063 above.
+
 ## Exit / paused routing (T-068)
 
 `/unified exit [name]` **pauses** the sender's routing out of a unified thread. It is distinct from `leave`:
@@ -113,6 +121,43 @@ imsg: "Hallo alle"  →  agent (dispatched normally)
 - **Runs in ALL modes** — `participant` / `reactive` / `off` / `silent` / `protokoll`. The mode controls how the **agent** reacts; the humans always see the message. The relay fires **before** the mode checks, and before the adaptive buffer check, so it is never gated or delayed by the mode/state machine.
 - **Loop-safe** — the relay copy goes only into the **outbox** (the wrapper sends it via its platform API). The wrappers never feed sent messages back into the adapter's `inbox`, so a relayed copy can't be re-dispatched as an inbound message. No loop is possible.
 - **Source excluded** — the originator's own bridge gets no relay copy; they already see their message on their platform.
+
+### Mirror dedupe_key (T-274 P2)
+
+Every mirror copy carries **`metadata.dedupe_key`** — the stable identity of the *logical* message. a2a wrappers mint a fresh request/file id per hop, so wrapper-local ids cannot recognize a copy that loops back through a relay chain (live finding: triple-mirrored messages on threads whose members are all a2a peers). The dedupe_key closes that gap:
+
+- **Fresh inbound** (no key) — the first dispatch of a unified-thread message mints `dedupe_key = "bdk1-" + sha256(gateway_msg_id)[:16]` and stamps it into **every mirror copy** (same key for the whole fan-out).
+- **Keyed inbound** — a message that already carries `metadata.dedupe_key` (a later hop of a mirrored message) **propagates that key** into its own mirrors, so all onward hops stay the same logical message.
+- **Ledger gate** — `_process_incoming` checks the inbound key against the persisted seen-ledger (`dk~` namespace inside `dedup_map.json`, same TTL/cap mechanics as T-100, loaded on `connect()`) **before** any turn, relay, or `/unified` command parsing. Seen → drop: no turn, no new mirror. First sighting → recorded immediately (crash-safe against relay-then-crash), so keyed traffic is effectively once-only.
+- **Wrapper contract** — the key survives hops only if wrappers round-trip the outbox JSON's `metadata` field into the next hop's payload/inbox JSON (the a2a wrapper already forwards `metadata` on the outbound leg; `request_to_inbox` must map `req.metadata` into the inbox JSON for the inbound leg).
+
+### Deliver receipts (T-274 P5)
+
+Every inbound *message* path produces a deliver receipt — returned by `_process_incoming` **and** appended to `<bridge_dir>/delivery_receipts/<bridge>.jsonl` (one JSON line per message; last 500 kept):
+
+```json
+{"ts": "2026-11-18T12:00:00+01:00", "bridge": "imsg", "file": "m1.json",
+ "message_id": "m1", "dedupe_key": "bdk1-0f1e...", "delivered_to_agent": false,
+ "drop_reason": "silent_buffered"}
+```
+
+`delivered_to_agent: true` means the event passed every adapter-level gate and was handed to the gateway framework for an agent turn. `false` means the adapter dropped or buffered it, with `drop_reason` naming why:
+
+| `drop_reason` | Meaning |
+|---------------|---------|
+| `dedupe_key_seen` | Mirror copy whose dedupe_key is already in the ledger (T-274 P2) |
+| `duplicate_id` | Wrapper id already dispatched (T-100) |
+| `missing_sender` | Inbox JSON without `sender` |
+| `mode_reactive_no_mention` | `reactive` mode without a mention |
+| `mode_off` | `off` mode |
+| `silent_buffered` | `silent` (mute) buffering — no turn *yet* |
+| `protokoll_collected` | Collected into an open protokoll session |
+| `a2a_digest_buffered` | Buffered into the a2a digest window (T-061E) |
+| `adaptive_digest_buffered` | Participant-mode adaptive window still open |
+| `adaptive_frequency_buffered` | Adaptive frequency threshold hit (T-061) |
+| `group_no_mention` | Non-direct chat without a mention |
+
+Reactions and `/unified` commands produce no receipt (`_process_incoming` returns `None` — they have their own ack semantics). The receipt reflects the **agent side only**: a mode-gate drop still relays the copy to the other humans (T-063), and a `silent_buffered` message later lands inside the flushed digest bundle (that bundle turn receipts as `true`).
 
 ## Participant modes
 
@@ -255,6 +300,8 @@ The **active thread** map (T-064) lives in a separate file, `<bridge_dir>/active
 The **paused threads** (T-068) live in `<bridge_dir>/paused_threads.json` (`{person → [thread_names]}`), loaded on `connect()` and rewritten on every `/unified exit` / `switch` / `join`.
 
 The **pending identity claims** (T-065) live in `<bridge_dir>/pending_claims.json` (`{claim_id → {code, source, target, expires}}`), loaded on `connect()` and rewritten on every `claim`/`confirm`. The **usernames** (T-065) live in `<bridge_dir>/usernames.json` (`{person → display_name}`), loaded on `connect()` and rewritten on every `/unified set username`. The **identity map** is now also written programmatically (`_save_identity_map`, atomic write) when a claim is confirmed — previously it was hand-edit only.
+
+The **inbound dedup ledger** (T-100 + T-274 P2) lives in `<bridge_dir>/dedup_map.json`: T-100 keys are `bridge~local_id`, the T-274 mirror-dedupe keys are prefixed `dk~` (`dk~bdk1-…`). Both namespaces share the TTL-prune/cap persistence path and are loaded on `connect()`. The **deliver receipts** (T-274 P5) are append-only JSONL per bridge at `<bridge_dir>/delivery_receipts/<bridge>.jsonl`, capped to the last 500 lines.
 
 ## Notes / limits
 

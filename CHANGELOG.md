@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **T-274 P2 — Mirror dedupe_key:** every unified-thread mirror copy
+  carries a stable `metadata.dedupe_key` (hash of the dispatched
+  `gateway_msg_id`, propagated verbatim on later hops). `_process_incoming`
+  checks inbound `dedupe_key`s against the persisted seen-ledger (the
+  `dk~` namespace inside `dedup_map.json`, TTL/cap like T-100): a copy
+  that loops back through a re-id-ing wrapper chain (a2a) is dropped
+  before any turn, relay or `/unified` command — closes the live
+  triple-mirror finding on a2a-only threads.
+- **T-274 P5 — Deliver receipts:** every inbound message path returns a
+  receipt `{"delivered_to_agent": bool, "drop_reason": str | None}` from
+  `_process_incoming` and appends it to
+  `<bridge_dir>/delivery_receipts/<bridge>.jsonl` (last 500 lines kept).
+  Non-turn paths (mode gates, silence guard, dedupe drops, digest
+  buffering, protokoll) receipt `false` + `drop_reason`; a regular turn
+  receipts `true`.
+- **T-274 P9 — Docs:** UNIFIED_THREADS.md sections for direct sends that
+  do NOT fan out into a unified thread, the `unified~<name>:<name>`
+  channel-directory id, member-key routing, the mirror dedupe_key
+  contract, and the drop-reason matrix.
+
 ### Fixed
 - **T-094:** `write_private` (SDK) is now atomic — temp file with a uuid
   suffix (T-079 pattern) + `os.replace`. A concurrent reader (the adapter's
