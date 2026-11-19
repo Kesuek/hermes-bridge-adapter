@@ -272,3 +272,12 @@ See `wrappers/imsg-wrapper.py` for a complete example (watch stream with auto-re
 - Python 3.11+
 - No additional dependencies (uses Hermes Gateway SDK)
 
+## Hall of Fame
+
+People who took the time to report bugs and fix them — this project is better because of them:
+
+| Contributor | Contribution |
+|---|---|
+| [@teknium1](https://github.com/teknium1) | [#1](https://github.com/Kesuek/hermes-bridge-adapter/pull/1) — `hermes_yaml` import falls back to `pyyaml` when unavailable (Hermes v0.21.5 compatibility) |
+| [@ivan-rivera-projects](https://github.com/ivan-rivera-projects) | [#2](https://github.com/Kesuek/hermes-bridge-adapter/issues/2) — detailed report of the YAML-list `mention_patterns` crash; [#3](https://github.com/Kesuek/hermes-bridge-adapter/pull/3) — fix: YAML-list options stay lists, one bad mention pattern no longer aborts polling |
+
